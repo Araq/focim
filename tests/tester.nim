@@ -14,6 +14,10 @@ template execBackend(cmd: string) =
 
 
 execBackend("")
+when defined(feature.uirelays.figDrawWindy):
+  execBackend("--define:\"feature.uirelays.figDrawWindy\"")
+when defined(feature.uirelays.figDrawSiwin):
+  execBackend("--define:\"feature.uirelays.figDrawSiwin\"")
 when defined(linux):
   execBackend("-d:gtk4")
 # execBackend("-d:sdl2")
