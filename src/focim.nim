@@ -1,4 +1,6 @@
 ##[
+focim -- the Focussed Nim Editor.
+
 Design Notes:
 
 Everything is text. The core widget is **SynEdit** -- a syntax-aware text
@@ -26,17 +28,22 @@ each with its own *flipped* edit semantics:
   partial name accepts the first match -- so there is no need for a modal
   "open file" dialog.
 
-The same idea applied to the window itself: tab 0 is `[layout]`, and its text
-IS the layout table this app is built from. Editing it relayouts the window on
-the next frame, so there is no separate settings dialog either. Leaving a
-widget out of the table hides it without destroying it -- its buffer, cursor
-and scroll position are still there when a later layout lists it again. Only
-the `editor` cell has to stay, since it is where the layout gets typed. A table
-that does not parse is reported in the status bar and ignored, so the last good
-layout keeps the window usable.
+The same idea applied to the window itself: tab 0 is `[config]`, and its text
+IS the NIF `(config ...)` this app is built from -- the `(layout ...)` that
+places the widgets and the `(theme ...)` that colors them. Editing it
+relayouts and recolors the window on the next frame, so there is no separate
+settings dialog either. Leaving a widget out of the layout hides it without
+destroying it -- its buffer, cursor and scroll position are still there when a
+later layout lists it again. Only the `editor` cell has to stay, since it is
+where the config gets typed. A config that does not parse is reported in the
+status bar, with the line and column of the mistake, and ignored, so the last
+good one keeps the window usable; a theme whose text would be unreadable on
+its own background is refused the same way. Every color in it is written as
+`"#RRGGBB"`, which SynEdit draws a chip of, so the palette is visible while it
+is being edited.
 
-The layout and the list of open tabs are stored under `getConfigDir()` in
-`relayedit/layout.md` and `relayedit/tabs.txt`, so both survive a restart.
+The config and the list of open tabs are stored under `getConfigDir()` in
+`focim/config.nif` and `focim/tabs.txt`, so both survive a restart.
 ]##
 
 import std/[tables, os, algorithm]
@@ -44,17 +51,37 @@ from std/strutils import toLowerAscii, strip, endsWith, contains, splitLines
 from std/cmdline import paramCount, paramStr
 import uirelays
 import uirelays/layout
-import widgets/[synedit, terminal]
+import widgets/[synedit, terminal, config]
 
-const defaultLayout = """
-| title, 1 line                                                                     |
-| tabs, 6 lines, 200px ; explorer, * | editor, 3* | history, 5 lines, 2* ; terminal, * |
-| status, 1 line                                                                    |
+const defaultConfig = """
+(config
+  (layout
+    (cols
+      (rows (px 200)
+        (tabs (lines 6))
+        (explorer))
+      (editor (stretch 3))
+      (rows (stretch 2)
+        (history (lines 5))
+        (terminal)))
+    (status (lines 1)))
+  # Anything left out keeps the color it has; `doc/config.md` lists the fields.
+  (theme
+    (bg "#15171B")
+    (fg "#E6DFD1"
+      (Keyword "#E5B94E")
+      (StringLit "#2EC4B6")
+      (DecNumber "#E8833A")
+      (Comment "#7A7365"))))
 """
 
 const
   PathChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '.', '/', '\\',
                '-', '~', '\128'..'\255'}
+  # Font sizes are *logical*: `fontForSize` turns them into physical ones with
+  # the display's `uiScale`, so 16 looks the same on a 4K laptop panel as on a
+  # 96 dpi monitor, and Ctrl+plus/minus steps by the same apparent amount on
+  # both.
   DefaultFontSize = 16
   MinFontSize = 8
   MaxFontSize = 56
@@ -62,7 +89,7 @@ const
   ## keeps its state until a later layout brings it back. Only the editor
   ## has to stay: without it there is nowhere to type the layout back.
   RequiredCells = ["editor"]
-  ConfigDirName = "relayedit"
+  ConfigDirName = "focim"
 
 proc configPath(name: string): string =
   getConfigDir() / ConfigDirName / name
@@ -81,11 +108,18 @@ proc loadConfig(name: string): string =
   except CatchableError:
     result = ""
 
+var gUiScale = 100
+  ## Percent to enlarge text by on this display, from `ScreenLayout.uiScale`.
+  ## A global because every `fontForSize` call needs it and none of them cares
+  ## about anything else the window knows.
+
 proc fontForSize(fonts: var Table[int, Font]; size: int): Font =
+  ## `size` and the cache key are logical; only what reaches `openFont` is
+  ## physical.
   let clamped = clamp(size, MinFontSize, MaxFontSize)
   if clamped notin fonts:
     var metrics: FontMetrics
-    fonts[clamped] = openFont("", clamped, metrics)
+    fonts[clamped] = openFont("", clamped * gUiScale div 100, metrics)
   result = fonts[clamped]
 
 proc extractPath(s: SynEdit; pos: int): tuple[path: string, a, b: int] =
@@ -135,7 +169,7 @@ type
   BufferEntry = object
     ed: SynEdit
     path: string        ## "" for generated buffers
-    isLayout: bool      ## this buffer's text IS the window layout
+    isConfig: bool      ## this buffer's text IS the window's config
 
 proc newBuffer(font: Font; path: string): BufferEntry =
   var ed = createSynEdit(font)
@@ -199,7 +233,7 @@ proc displayNames(buffers: seq[BufferEntry]): seq[string] =
   var base: seq[string] = @[]
   for b in buffers:
     base.add(
-      if b.isLayout: "[layout]"
+      if b.isConfig: "[config]"
       elif b.path.len > 0: b.path.extractFilename
       else: "[scratch]")
   result = @[]
@@ -294,9 +328,9 @@ proc applyTabEdits(tabs: var TabList; buffers: var seq[BufferEntry];
   # Some tabs refuse to close: put their line back.
   for i in 0 ..< tabs.names.len:
     if not taken[i]:
-      if buffers[i].isLayout:
-        # Closing it would leave no way to edit the layout back.
-        tabs.note = "the layout buffer stays open"
+      if buffers[i].isConfig:
+        # Closing it would leave no way to edit the config back.
+        tabs.note = "the config buffer stays open"
       elif buffers[i].path.len > 0 and buffers[i].ed.changed:
         # A buffer without a path cannot be saved, so the guard would be
         # a trap rather than a warning.
@@ -319,29 +353,25 @@ proc applyTabEdits(tabs: var TabList; buffers: var seq[BufferEntry];
   for i, n in newNames:
     if n == currentName: current = i
 
-proc reparseLayout(src: string; width, height, lineHeight: int;
-                   layout: var Layout; note: var string) =
-  ## The layout buffer's text IS the layout. A layout that does not parse,
-  ## or that loses a cell the app needs, is reported and dropped -- the last
-  ## good one keeps the window usable so the text can be corrected.
-  var parsed: Layout
-  try:
-    parsed = parseLayout(src)
-  except CatchableError:
-    note = "layout: " & getCurrentExceptionMsg()
+proc reparseConfig(src: string; width, height, lineHeight: int;
+                   layout: var Layout; theme: var Theme; note: var string) =
+  ## The config buffer's text IS the window. A config that does not parse, or
+  ## that loses a cell the app needs, is reported and dropped -- the last good
+  ## one keeps the window usable so the text can be corrected. A theme that
+  ## cannot be read is dropped by the parser in the same spirit, and says so in
+  ## `note` while the rest of the config is kept.
+  let parsed = parseConfig(src)
+  if parsed.error.len > 0:
+    note = "config: " & parsed.error
     return
-  var cells: Table[string, Rect]
-  try:
-    cells = parsed.resolve(width, height, lineHeight, gap = 2)
-  except CatchableError:
-    note = "layout: " & getCurrentExceptionMsg()
-    return
+  let cells = parsed.layout.resolve(width, height, lineHeight, gap = 2)
   for name in RequiredCells:
     if name notin cells:
-      note = "layout: no '" & name & "' cell"
+      note = "config: no '" & name & "' cell"
       return
-  layout = parsed
-  note = ""
+  layout = parsed.layout
+  theme = parsed.theme
+  note = parsed.note
 
 # ---------------------------------------------------------------------------
 # Explorer -- a flat listing of one directory, with an editable path line
@@ -433,7 +463,7 @@ proc activateEntry(ex: var Explorer; name: string;
     let p = ex.dir / name
     if fileExists(p):
       current = buffers.openFile(font, p, -1, -1)
-      setWindowTitle("SynEdit - " & name)
+      setWindowTitle("focim - " & name)
       focus = "editor"
 
 proc handleTermCtrlClick(buf: SynEdit; pos: int;
@@ -446,14 +476,14 @@ proc handleTermCtrlClick(buf: SynEdit; pos: int;
   term.ed.underline(a, b)
   if dirExists(path):
     os.setCurrentDir(path)
-    setWindowTitle("SynEdit Demo - " & path)
+    setWindowTitle("focim - " & path)
     term.ed.appendOutput("\L")
     term.insertPrompt()
     var lsCmd = "ls"
     discard term.runCommand(lsCmd)
   elif fileExists(path):
     current = buffers.openFile(font, path, ln, fc)
-    setWindowTitle("SynEdit - " & path.extractFilename)
+    setWindowTitle("focim - " & path.extractFilename)
     focus = "editor"
 
 proc updateStatus(status: var Terminal; ed: SynEdit; path, note: string) =
@@ -466,43 +496,42 @@ proc updateStatus(status: var Terminal; ed: SynEdit; path, note: string) =
   status.ed.lang = langConsole
   status.ed.appendOutput(info)
 
-proc updateHistory(history: var SynEdit; term: Terminal) =
-  ## Show the most recent commands from all terminal history.
-  var cmds: seq[string]
-  for process, h in term.hist:
-    for cmd in h.cmds:
-      cmds.add cmd
-  # Show most recent last (bottom of the list, closest to terminal)
-  var text = ""
-  for i, cmd in cmds:
-    if i > 0: text.add "\n"
-    text.add cmd
-  history.setLabel(text)
+proc addHistoryLine(history: var SynEdit; cmd: string) =
+  ## Append a command to the history panel as an ordinary edit, so that the (x)
+  ## button, a hand-made deletion and Ctrl+Z all act on it the same way. An
+  ## existing copy moves to the end instead of being repeated -- the list is
+  ## there to save typing, not to record every repetition.
+  if cmd.len == 0: return
+  for i in 0 ..< history.getLineCount():
+    if history.getLineText(i) == cmd:
+      history.gotoLine(i + 1, 0)
+      history.deleteLine()
+      break
+  history.gotoPos(history.len)
+  # One insertText, so one Ctrl+Z takes the whole row back out again.
+  history.insertText(if history.len > 0: "\n" & cmd else: cmd)
 
 proc tryOpenFile(arg: string; buffers: var seq[BufferEntry];
                  current: var int; font: Font; focus: var string) =
   let path = if isAbsolute(arg): arg else: os.getCurrentDir() / arg
   if fileExists(path):
     current = buffers.openFile(font, path, -1, -1)
-    setWindowTitle("SynEdit - " & path.extractFilename)
+    setWindowTitle("focim - " & path.extractFilename)
     focus = "editor"
   elif dirExists(path):
     os.setCurrentDir(path)
-    setWindowTitle("SynEdit Demo - " & path)
+    setWindowTitle("focim - " & path)
 
 proc adjustFocusedFontSize(
     focus: string; delta: int;
     fonts: var Table[int, Font];
-    title, history: var SynEdit;
+    history: var SynEdit;
     tabs: var TabList; explorer: var Explorer;
     term, status: var Terminal;
     buffers: var seq[BufferEntry]; current: int;
-    titleFontSize, panelFontSize, historyFontSize,
+    panelFontSize, historyFontSize,
     terminalFontSize, statusFontSize, editorFontSize: var int) =
   case focus
-  of "title":
-    titleFontSize = clamp(titleFontSize + delta, MinFontSize, MaxFontSize)
-    title.setFont(fonts.fontForSize(titleFontSize))
   of "tabs", "explorer":
     panelFontSize = clamp(panelFontSize + delta, MinFontSize, MaxFontSize)
     let f = fonts.fontForSize(panelFontSize)
@@ -530,13 +559,13 @@ proc main =
   let screen = createWindow(1100, 700)
   var width = screen.width
   var height = screen.height
+  gUiScale = screen.uiScale
 
   var fonts: Table[int, Font]
   let font = fonts.fontForSize(DefaultFontSize)
   var fm = getFontMetrics(font)
-  setWindowTitle("SynEdit Demo")
+  setWindowTitle("focim")
 
-  var title = createSynEdit(font)
   var history = createSynEdit(font)
   var term = createTerminal(font)
   var status = createTerminal(font)
@@ -549,39 +578,54 @@ proc main =
   tabs.ed.setActionLines(0)
   explorer.ed.setActionLines(1)
   tabs.ed.setCloseButtons(0)
-  var titleFontSize = DefaultFontSize
+  # The history panel is a list of commands to act on, exactly like the tab
+  # list, so it gets the same framed rows and the same (x) -- which here forgets
+  # the command and frees the row for a newer one. `langNone` for the same
+  # reason the tab list uses it: a row is a label, not code to colorize.
+  history.setActionLines(0)
+  history.setCloseButtons(0)
+  history.lang = langNone
   var panelFontSize = DefaultFontSize
   var historyFontSize = DefaultFontSize
   var terminalFontSize = DefaultFontSize
   var statusFontSize = DefaultFontSize
   var editorFontSize = DefaultFontSize
 
-  title.setLabel("SynEdit Demo -- edit the [layout] tab to relayout this window")
-
-  # The layout the window starts with: whatever was stored last time, unless
-  # it no longer works -- then the default, with the reason in the status bar.
-  var layout = parseLayout(defaultLayout)
-  var layoutNote = ""
-  var layoutText = loadConfig("layout.md")
-  if layoutText.len > 0:
-    reparseLayout(layoutText, width, height, fm.lineHeight, layout, layoutNote)
-    if layoutNote.len > 0:
-      layoutNote = "stored " & configPath("layout.md") & " ignored -- " &
-                   layoutNote
-      layoutText = defaultLayout
+  # The config the window starts with: whatever was stored last time, unless it
+  # no longer works -- then the default, with the reason in the status bar.
+  var layout = default(Layout)
+  var theme = defaultTheme()
+  var configNote = ""
+  reparseConfig(defaultConfig, width, height, fm.lineHeight, layout, theme,
+                configNote)
+  doAssert configNote.len == 0, configNote
+  var configText = loadConfig("config.nif")
+  if configText.len > 0:
+    reparseConfig(configText, width, height, fm.lineHeight, layout, theme,
+                  configNote)
+    if configNote.len > 0:
+      # Whatever was wrong with it, the stored text stays in the buffer: it is
+      # what has to be corrected. Until it parses the window runs on the
+      # default, which the call above left in place.
+      configNote = configPath("config.nif") & ": " & configNote
   else:
-    layoutText = defaultLayout
+    configText = defaultConfig
 
-  # Buffer list. The layout buffer is tab 0: editing it relayouts the window
-  # on the next frame. The rest of the tabs are last session's.
+  # Buffer list. The config buffer is tab 0: editing it relayouts and recolors
+  # the window on the next frame. The rest of the tabs are last session's.
   var buffers: seq[BufferEntry]
   var current = 0
   block:
     var ed = createSynEdit(fonts.fontForSize(editorFontSize))
-    ed.lang = langMarkdown
+    # NIF is close enough to Nim for the tokenizer: parentheses, names, numbers
+    # and '#' comments all land where they should -- and a quoted "#RRGGBB" is
+    # a string literal, which is what makes `rfColorLiterals` draw a chip of
+    # the color right beside it.
+    ed.lang = langNim
+    ed.flags = {rfColorLiterals}
     ed.showLineNumbers = true
-    ed.setText(layoutText)
-    buffers.add BufferEntry(ed: ed, path: "", isLayout: true)
+    ed.setText(configText)
+    buffers.add BufferEntry(ed: ed, path: "", isConfig: true)
   for line in loadConfig("tabs.txt").splitLines:
     let p = line.strip
     if p.len > 0 and fileExists(p):
@@ -603,32 +647,62 @@ proc main =
 
   var running = true
   while running:
-    # Pick up edits to the layout buffer before resolving, so that the rects
+    # Pick up edits to the config buffer before resolving, so that the rects
     # and the hit tests within one frame always come from the same layout.
     # The buffer's own changed flag is the signal; consuming it here re-parses
-    # once per edit, whether the new table works out or not.
+    # once per edit, whether the new config works out or not.
     for b in buffers.mitems:
-      if b.isLayout and b.ed.changed:
+      if b.isConfig and b.ed.changed:
         let src = b.ed.fullText
-        reparseLayout(src, width, height, fm.lineHeight, layout, layoutNote)
-        if layoutNote.len == 0: saveConfig("layout.md", src)
+        reparseConfig(src, width, height, fm.lineHeight, layout, theme,
+                      configNote)
+        if configNote.len == 0: saveConfig("config.nif", src)
         b.ed.markSaved()
+
+    # The theme goes out to every widget every frame. Buffers come and go and
+    # the colors can change with any keystroke in the config, so there is no
+    # single place to hook this that could not be forgotten later.
+    history.theme = theme
+    tabs.ed.theme = theme
+    explorer.ed.theme = theme
+    term.ed.theme = theme
+    status.ed.theme = theme
+    for b in buffers.mitems: b.ed.theme = theme
 
     let cells = layout.resolve(width, height, fm.lineHeight, gap = 2)
     # A layout may have dropped the cell that had the focus.
     if focus notin cells: focus = "editor"
 
-    # Fill background -- gaps between cells show this color as borders
-    fillRect(rect(0, 0, width, height), color(200, 200, 200))
+    # Fill background -- gaps between cells show this color as borders, so it
+    # comes from the theme: `actionColor` is what the theme already uses to
+    # frame things.
+    fillRect(rect(0, 0, width, height), theme.actionColor)
 
     var e = default Event
     discard waitEvent(e, 500, {WantTextInput})
     case e.kind
     of QuitEvent, WindowCloseEvent:
       running = false
-    of WindowResizeEvent:
+    of WindowResizeEvent, WindowMetricsEvent:
       width = e.x
       height = e.y
+      if e.kind == WindowMetricsEvent and e.uiScale > 0 and e.uiScale != gUiScale:
+        # Dragged onto a display of another density. The logical sizes stay put
+        # and only their physical counterparts change, so every font that is
+        # already open has to be reopened at the new scale.
+        gUiScale = e.uiScale
+        for f in fonts.values: closeFont(f)
+        fonts.clear()
+        let panelFont = fonts.fontForSize(panelFontSize)
+        tabs.ed.setFont(panelFont)
+        explorer.ed.setFont(panelFont)
+        history.setFont(fonts.fontForSize(historyFontSize))
+        term.ed.setFont(fonts.fontForSize(terminalFontSize))
+        status.ed.setFont(fonts.fontForSize(statusFontSize))
+        let editorFont = fonts.fontForSize(editorFontSize)
+        for i in 0 ..< buffers.len:
+          buffers[i].ed.setFont(editorFont)
+        fm = getFontMetrics(fonts.fontForSize(DefaultFontSize))
     of MouseDownEvent:
       let hit = cells.hitTest(e.x, e.y)
       if hit.name.len > 0:
@@ -648,9 +722,9 @@ proc main =
         e = default Event  # consume the event
       elif cmd and (e.key == KeyEqual or e.key == KeyPlus or e.key == KeyMinus):
         let delta = if e.key == KeyMinus: -1 else: 1
-        adjustFocusedFontSize(focus, delta, fonts, title, history,
+        adjustFocusedFontSize(focus, delta, fonts, history,
                               tabs, explorer, term, status, buffers, current,
-                              titleFontSize, panelFontSize, historyFontSize,
+                              panelFontSize, historyFontSize,
                               terminalFontSize, statusFontSize, editorFontSize)
         e = default Event  # consume the event
       elif e.key == KeyEnter and focus == "tabs":
@@ -669,7 +743,7 @@ proc main =
           elif full.len > 0 and fileExists(full):
             current = buffers.openFile(fonts.fontForSize(editorFontSize),
                                        full, -1, -1)
-            setWindowTitle("SynEdit - " & full.extractFilename)
+            setWindowTitle("focim - " & full.extractFilename)
             focus = "editor"
           elif explorer.entries.len > 0:
             # A partial name accepts the first match.
@@ -684,8 +758,6 @@ proc main =
     # Widgets the layout leaves out are simply not drawn. They keep their
     # state, so they come back exactly as they were once a layout lists
     # them again.
-    if "title" in cells:
-      discard title.draw(e, cells["title"], focus == "title")
 
     # Tab list -- its lines ARE the open tabs. The bookkeeping runs even when
     # the list is hidden, because Ctrl+W still edits its buffer.
@@ -744,19 +816,23 @@ proc main =
     of noAction:
       buffers[current].ed.underline(-1, -1)
 
-    # History panel -- click to re-run a command
+    # History panel -- its lines ARE the command list, so a click re-runs a line
+    # and the (x) deletes one. The ingest runs even when the layout leaves the
+    # panel out, so nothing typed while it was hidden goes missing.
+    for cmd in term.ran: history.addHistoryLine(cmd)
+    term.ran.setLen 0
     if "history" in cells:
-      updateHistory(history, term)
-      discard history.draw(e, cells["history"], focus == "history")
-      if e.kind == MouseDownEvent and focus == "history":
-        let idx = history.currentLine
-        let cmds = block:
-          var r: seq[string]
-          for _, h in term.hist:
-            for cmd in h.cmds: r.add cmd
-          r
-        if idx < cmds.len:
-          var cmd = cmds[idx]
+      let histAct = history.draw(e, cells["history"], focus == "history")
+      if histAct.kind == closeLine:
+        # Same as the tab list: the button deletes the line, so closing by
+        # button and closing by hand share one undo stack.
+        history.gotoLine(histAct.line + 1, 0)
+        history.deleteLine()
+      elif e.kind == MouseDownEvent and focus == "history":
+        # Only a click on the row itself re-runs it: the (x) took the branch
+        # above and must not activate what it is removing.
+        var cmd = history.getLineText(history.currentLine)
+        if cmd.len > 0:
           discard term.runCommand(cmd)
           focus = "terminal"
 
@@ -768,7 +844,7 @@ proc main =
     of openFile:
       if fileExists(termAct.file):
         current = buffers.openFile(fonts.fontForSize(editorFontSize), termAct.file, -1, -1)
-        setWindowTitle("SynEdit - " & termAct.file.extractFilename)
+        setWindowTitle("focim - " & termAct.file.extractFilename)
         focus = "editor"
     of saveFile:
       if buffers[current].path.len > 0:
@@ -784,9 +860,9 @@ proc main =
       term.ed.underline(-1, -1)
 
     # Status bar / prompt -- update prefix when not focused
-    # A broken layout is the more urgent of the two notes: it is what the
-    # user is looking at while typing in the [layout] tab.
-    let note = if layoutNote.len > 0: layoutNote else: tabs.note
+    # A broken config is the more urgent of the two notes: it is what the
+    # user is looking at while typing in the [config] tab.
+    let note = if configNote.len > 0: configNote else: tabs.note
     if focus != "status":
       updateStatus(status, buffers[current].ed, buffers[current].path, note)
     var statusAct = TermAction(kind: noAction)
