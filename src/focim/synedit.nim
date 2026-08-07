@@ -28,6 +28,18 @@
 ##   term.init(font)
 ##   term.lang = langConsole
 ##   term.appendOutput("$ ")   # user types after the prompt
+##
+## List of clickable lines -- a field where a click acts instead of just
+## placing the cursor. The frame is the affordance; what a click does is up
+## to the caller::
+##
+##   var tabs = createSynEdit(font)
+##   tabs.setActionLines(0)     # every line is clickable
+##   tabs.setCloseButtons(0)    # ... and closable
+##   # setActionLines(1) would leave line 0 as a normal field
+##   # in your main loop:
+##   let act = tabs.draw(e, area, focused)
+##   if act.kind == closeLine: tabs.gotoLine(act.line + 1, 0); tabs.deleteLine()
 
 import ../uirelays/[coords, screen, input]
 import ./theme
@@ -125,13 +137,16 @@ type
   EditActionKind* = enum
     noAction,
     ctrlHover,          ## ctrl+mouse move over text
-    ctrlClick           ## ctrl+click on text
+    ctrlClick,          ## ctrl+click on text
+    closeLine           ## the (x) button of a line was clicked
 
   EditAction* = object
     case kind*: EditActionKind
     of noAction: discard
     of ctrlHover, ctrlClick:
       pos*: int         ## buffer offset
+    of closeLine:
+      line*: int        ## 0-based line whose (x) was clicked
 
   ImageCacheEntry = object
     path: string
@@ -189,6 +204,12 @@ type
     markers: seq[Marker]
     # Line decorations (breakpoints, active execution line, etc.)
     lineDecorations: seq[LineDecoration]
+    # Action lines -- see setActionLines()
+    actionLines*: int               ## first line whose text is framed as
+                                    ## clickable; -1 = none
+    # Close buttons -- see setCloseButtons()
+    closeLines*: int                ## first line with an (x) button; -1 = none
+    closeHover: int                 ## line whose (x) the mouse is over; -1 = none
     # Cached images for rich markdown rendering
     imageCache: seq[ImageCacheEntry]
     # Cache
@@ -202,6 +223,9 @@ proc currentLine*(s: SynEdit): int {.inline.} = s.currentLine.int
 proc currentCol*(s: SynEdit): int {.inline.} = s.desiredCol.int
 proc changed*(s: SynEdit): bool {.inline.} = s.changed
 proc markChanged*(s: var SynEdit) = s.changed = true
+proc markSaved*(s: var SynEdit) = s.changed = false
+  ## Clear the changed flag without writing a file, for buffers whose content
+  ## has been consumed by something other than `saveToFile`.
 proc cursor*(s: SynEdit): int {.inline.} = s.cursor.int
 proc cacheId*(s: SynEdit): int {.inline.} = s.cacheId
 proc getFont*(s: SynEdit): Font {.inline.} = s.font
@@ -1889,6 +1913,7 @@ proc createSynEdit*(font: Font; theme = catppuccinMocha()): SynEdit =
   result = SynEdit(front: @[], back: @[], actions: @[], cursor: 0,
     selected: (-1, -1), bracketA: -1, bracketB: -1, hotLink: (-1, -1),
     readOnly: -1, tabSize: TabWidth, lang: langNim,
+    actionLines: -1, closeLines: -1, closeHover: -1,
     font: font, theme: theme, flags: {},
     showLineNumbers: false, cursorVisible: true, lastBlinkTick: 0)
 
@@ -2079,6 +2104,36 @@ proc clearLineDecoration*(s: var SynEdit; line: int) =
 proc clearLineDecorations*(s: var SynEdit) =
   ## Remove all line decorations.
   s.lineDecorations.setLen 0
+
+# ---------------------------------------------------------------------------
+# Action lines -- lines that act on click instead of just taking the cursor
+# ---------------------------------------------------------------------------
+
+proc setActionLines*(s: var SynEdit; first: int) =
+  ## Frame the text of every line from `first` on, marking it as clickable:
+  ## in such a field a click does something (activate, open, navigate)
+  ## rather than merely placing the cursor. Pass `first = -1` to disable.
+  ## Survives `setText`, so a field can be declared clickable once.
+  ## The frame is drawn in `theme.actionColor`.
+  s.actionLines = first
+
+proc setCloseButtons*(s: var SynEdit; first: int) =
+  ## Draw an (x) button at the right edge of every line from `first` on.
+  ## Clicking one yields `EditAction(kind: closeLine, line: ...)` and leaves
+  ## the cursor alone, so it does not double as an activating click.
+  ## Pass `first = -1` to disable. Survives `setText`.
+  ## The button is drawn in `theme.closeColor`.
+  s.closeLines = first
+
+proc closeButtonWidth(s: SynEdit): int {.inline.} =
+  fontLineSkip(s.font) - 1
+
+proc drawFrame(r: Rect; color: Color) =
+  if r.w <= 0 or r.h <= 0: return
+  fillRect(rect(r.x, r.y, r.w, 1), color)
+  fillRect(rect(r.x, r.y + r.h - 1, r.w, 1), color)
+  fillRect(rect(r.x, r.y, 1, r.h), color)
+  fillRect(rect(r.x + r.w - 1, r.y, 1, r.h), color)
 
 const
   CharBufSize = 80
@@ -2336,6 +2391,21 @@ const ScrollBarWidth* = 14
 proc scrollEnabled(s: SynEdit): bool {.inline.} =
   s.span > 0 and s.span.Natural <= s.numberOfLines
 
+proc closeButtonHit(s: SynEdit; area: Rect; x, y: int): int =
+  ## The line whose (x) button covers (x, y), or -1. The button column is
+  ## derived from the area alone, so this answers before the line is drawn.
+  result = -1
+  if s.closeLines < 0 or not area.contains(point(x, y)): return
+  let lineH = fontLineSkip(s.font)
+  if lineH <= 0: return
+  let endX = area.x + area.w -
+             (if s.scrollEnabled: ScrollBarWidth else: 0) - 1
+  if x < endX - s.closeButtonWidth or x > endX: return
+  let line = s.firstLine.int + (y - area.y) div lineH
+  if line < s.closeLines or line >= s.getLineCount(): return
+  if s.getLineText(line).len == 0: return   # an empty line has no button
+  result = line
+
 proc scrollGrip(s: SynEdit; area: Rect; lineH: int): Rect =
   ## Compute the scrollbar grip rectangle.
   if not s.scrollEnabled: return
@@ -2409,7 +2479,38 @@ proc render*(s: var SynEdit; area: Rect; showCursor: bool) =
         inc renderLine
         continue
 
+    let thisLine = renderLine.int
+    let actionLine = s.actionLines >= 0 and thisLine >= s.actionLines
+    let closeLine = s.closeLines >= 0 and thisLine >= s.closeLines
+    let lineY = dim.y
+    let lineStart = i
     i = s.drawTextLine(i, dim, blink)
+    if actionLine or closeLine:
+      # Drawn after the text, so the per-token backgrounds cannot paint over
+      # the frame's top and bottom edges -- and so the button occludes a
+      # name that is too long for the column.
+      let empty = lineStart >= s.len or s[lineStart] == '\L'
+      if not empty:
+        if closeLine:
+          let bw = s.closeButtonWidth
+          let br = rect(endX - bw, lineY, bw, lineH - 1)
+          let hovered = s.closeHover == thisLine
+          # The cross is drawn, not typed: no font has to have the glyph.
+          fillRect(br, if hovered: s.theme.closeColor else: s.getBg(lineStart))
+          let fg = if hovered: s.theme.bg else: s.theme.closeColor
+          let pad = max(3, bw div 4)
+          let x0 = br.x + pad
+          let x1 = br.x + br.w - 1 - pad
+          let y0 = br.y + pad
+          let y1 = br.y + br.h - 1 - pad
+          drawLine(x0, y0, x1, y1, fg)
+          drawLine(x1, y0, x0, y1, fg)
+        if actionLine:
+          # The frame outlines the whole row, so the row reads as one target
+          # -- and drawing it last puts its edges over the button's fill.
+          # lineH - 1 keeps consecutive frames from sharing an edge.
+          drawFrame(rect(area.x, lineY, endX - area.x + 1, lineH - 1),
+                    s.theme.actionColor)
     inc s.span, consumedRows
     inc renderLine
 
@@ -2446,6 +2547,11 @@ proc draw*(s: var SynEdit; e: Event; area: Rect; focused: bool): EditAction =
   let lineH = fontLineSkip(s.font)
   let grip = s.scrollGrip(area, lineH)
   let hasScrollBar = s.scrollEnabled
+  let closeHit =
+    if e.kind in {MouseDownEvent, MouseMoveEvent}:
+      s.closeButtonHit(area, e.x, e.y)
+    else: -1
+  if e.kind == MouseMoveEvent: s.closeHover = closeHit
 
   case e.kind
   of TextInputEvent:
@@ -2533,6 +2639,10 @@ proc draw*(s: var SynEdit; e: Event; area: Rect; focused: bool): EditAction =
     if hasScrollBar and grip.contains(point(e.x, e.y)):
       s.scrollGrabbed = true
       s.scrollGrabOffset = e.y - grip.y
+    elif closeHit >= 0:
+      # Leave the cursor where it is: closing a line is not activating it.
+      s.render(area, showCursor = focused)
+      return EditAction(kind: closeLine, line: closeHit)
     elif area.contains(point(e.x, e.y)):
       if LinkMod in e.mods:
         s.setCursorFromMouse(e.x, e.y, 1)
