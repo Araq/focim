@@ -1704,7 +1704,11 @@ proc dedent(s: var SynEdit) =
       else: break
 
 proc gotoLine*(s: var SynEdit; line, col: int) =
-  let line = clamp(line - 1, 0, max(0, s.numberOfLines.int - 1))
+  # `numberOfLines` counts the line breaks, so it *is* the index of the last
+  # line -- the same bound `currentLine` is clamped to everywhere else. Taking
+  # one off here made the last line unreachable, which is why the (x) on the
+  # bottom row of the tab list used to close the row above it.
+  let line = clamp(line - 1, 0, s.numberOfLines.int)
   s.cursor = s.getLineOffset(line).Natural
   s.currentLine = line.Natural
   let span = if s.span > 0: s.span else: 30
@@ -1746,13 +1750,18 @@ proc deleteLine*(s: var SynEdit) =
   while lineEnd < s.len and s[lineEnd] != '\L': inc lineEnd
   # include the trailing newline if present
   let delEnd = if lineEnd < s.len: lineEnd else: lineEnd - 1
+  # The last line has no newline of its own, so it takes the one in front of
+  # it instead. Otherwise deleting it would leave an empty row where it was,
+  # and a list whose rows are its contents -- the tab list, the history panel
+  # -- would keep a row nothing is behind.
+  let stop = if lineEnd < s.len: lineStart else: max(0, lineStart - 1)
   s.cursor = (delEnd + 1).Natural
   s.setCurrentLine()
   let oldCursor = s.cursor
   s.actions.setLen(clamp(s.undoIdx + 1, 0, s.actions.len))
   s.actions.add(Action(k: delFinished, pos: s.cursor, word: "", version: s.version))
   s.edit()
-  while s.cursor.int > lineStart and s.cursor > 0:
+  while s.cursor.int > stop and s.cursor > 0:
     if s.cursor.int - 1 <= s.readOnly: break
     s.prepareForEdit()
     s.rawBackspace(overrideUtf8 = true, s.actions[^1].word)
