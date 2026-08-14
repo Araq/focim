@@ -51,6 +51,11 @@ Markdown is still SynEdit, not a browser pane. Headings, links and fenced
 code light up in place; Cmd/Ctrl+click on a `[label](path)` opens a relative
 file (or jumps to `#heading`), so Nimony's `doc/*.md` can be explored without
 leaving the editor.
+
+Ctrl+Space completes a word. There is no compiler in the loop and nothing
+here knows what a name *means*; what it knows is which names exist -- in the
+open buffers, in a directory that `index <path>` was pointed at, and in the
+Nimony vocabulary that ships with the editor. See `doc/completion.md`.
 ]##
 
 import std/[tables, os, algorithm]
@@ -59,7 +64,8 @@ from std/strutils import toLowerAscii, strip, endsWith, contains, splitLines,
 from std/cmdline import paramCount, paramStr
 import uirelays
 import uirelays/layout
-import widgets/[synedit, terminal, config]
+import widgets/[synedit, terminal, config, wordindex]
+import completion
 
 const defaultConfig = """
 (config
@@ -136,6 +142,11 @@ const
   ## has to stay: without it there is nowhere to type the layout back.
   RequiredCells = ["editor"]
   ConfigDirName = "focim"
+  WordsDirName = "words"
+    ## Under the config dir: one file per indexed path, so that `index` is
+    ## paid for once and not on every start.
+  ShippedWords = "nimony.txt"
+    ## The vocabulary that comes with the editor, next to the binary.
 
 proc configPath(name: string): string =
   getConfigDir() / ConfigDirName / name
@@ -143,7 +154,7 @@ proc configPath(name: string): string =
 proc saveConfig(name, text: string) =
   ## Best effort: an unwritable config dir must not take the editor down.
   try:
-    createDir(getConfigDir() / ConfigDirName)
+    createDir(configPath(name).parentDir)
     writeFile(configPath(name), text)
   except CatchableError:
     discard
@@ -216,6 +227,7 @@ type
     ed: SynEdit
     path: string        ## "" for generated buffers
     isConfig: bool      ## this buffer's text IS the window's config
+    idx: BufferIndexer  ## how far the word index has walked this buffer
 
 proc newBuffer(font: Font; path: string): BufferEntry =
   var ed = createSynEdit(font)
@@ -548,6 +560,70 @@ proc activateEntry(ex: var Explorer; idx: int;
       setWindowTitle("focim - " & name)
       focus = "editor"
 
+# ---------------------------------------------------------------------------
+# Word sets on disk
+# ---------------------------------------------------------------------------
+
+proc wordSetFile(name: string): string =
+  ## A path is not a file name, so every separator becomes an underscore.
+  ## Two paths could in principle collide here; the file says which one it
+  ## holds, so the worst case is that a cache is rewritten.
+  var s = ""
+  for c in name:
+    if c in {'a'..'z', 'A'..'Z', '0'..'9', '-', '.'}: s.add c
+    elif s.len > 0 and s[^1] != '_': s.add '_'
+  result = WordsDirName / s.strip(chars = {'_'}) & ".txt"
+
+proc loadWordSet(words: var WordIndex; file: string) =
+  ## Best effort, like everything else that reads a file the editor wrote: a
+  ## word list is a cache, and a cache that is gone or unreadable is a reason
+  ## to have fewer words, never a reason to stop.
+  var text = ""
+  try:
+    text = readFile(file)
+  except CatchableError:
+    return
+  var ws = parseWordSet(text)
+  if ws.name.len == 0: ws.name = file
+  words.addSet ws
+
+proc loadWordSets(words: var WordIndex) =
+  ## The shipped vocabulary, then everything `index` stored in earlier runs.
+  for p in [getAppDir() / "data" / ShippedWords,
+            getAppDir().parentDir / "data" / ShippedWords]:
+    if fileExists(p):
+      loadWordSet(words, p)
+      break
+  try:
+    for kind, p in walkDir(configPath(WordsDirName)):
+      if kind == pcFile and p.endsWith(".txt"):
+        loadWordSet(words, p)
+  except CatchableError:
+    discard
+
+proc runIndexCommand(act: TermAction; words: var WordIndex; job: var IndexJob;
+                     note: var string) =
+  ## `index` on its own says what is indexed, `index <path>` starts a job, and
+  ## `unindex <path>` forgets one.
+  if act.path.len == 0:
+    var s = $words.wordCount & " words, " & $words.liveCount & " of them from " &
+            "the open buffers"
+    for ws in words.sets: s.add "; " & ws.name & " " & $ws.words.len
+    note = s
+  elif act.forget:
+    if words.dropSet(act.path):
+      try: removeFile(configPath(wordSetFile(act.path)))
+      except CatchableError: discard
+      note = "forgot " & act.path
+    else:
+      note = "not indexed: " & act.path
+  elif not fileExists(act.path) and not dirExists(act.path):
+    note = "no such path: " & act.path
+  else:
+    job = startIndexJob(act.path)
+    if job.active: note = job.progress
+    else: note = "nothing to index in " & act.path
+
 proc handleTermCtrlClick(buf: SynEdit; pos: int;
                          buffers: var seq[BufferEntry]; current: var int;
                          font: Font; term: var Terminal;
@@ -786,6 +862,14 @@ proc main =
   # panel the wheel is over.
   var pointerX, pointerY = -1
 
+  # The words Ctrl+Space can offer: the shipped Nimony vocabulary, whatever
+  # `index` was pointed at in an earlier run, and -- from here on, a slice per
+  # frame -- everything in the open buffers.
+  var words = WordIndex()
+  loadWordSets(words)
+  var job = IndexJob()
+  var comp = initCompletion(fonts.fontForSize(editorFontSize))
+
   var running = true
   while running:
     # Pick up edits to the config buffer before resolving, so that the rects
@@ -808,7 +892,30 @@ proc main =
     explorer.ed.theme = theme
     term.ed.theme = theme
     status.ed.theme = theme
+    comp.theme = theme
+    comp.setFont buffers[current].ed.getFont
     for b in buffers.mitems: b.ed.theme = theme
+
+    # The word index, a slice of one buffer per frame: whichever buffer the
+    # last edit left behind is caught up on before any other work, and none of
+    # it is ever felt because none of it is ever more than a couple hundred
+    # lines. `index` jobs run the same way, a few files at a time.
+    for i in 0 ..< buffers.len:
+      if buffers[i].idx.needsIndexing(buffers[i].ed):
+        discard words.indexSlice(buffers[i].ed, buffers[i].idx)
+        break
+    if job.active:
+      stepIndexJob(job, files = 32)
+      if job.active:
+        tabs.note = job.progress
+      else:
+        let ws = doneIndexJob(job)
+        words.addSet ws
+        saveConfig(wordSetFile(ws.name), ws.toText)
+        tabs.note = "indexed " & ws.name & ": " & $ws.words.len & " words" &
+          (if job.skipped > 0: ", " & $job.skipped & " files unreadable" else: "") &
+          (if job.truncated: ", stopped at " & $MaxIndexFiles & " files" else: "")
+        job = IndexJob()
 
     let cells = layout.resolve(width, height, fm.lineHeight, gap = 2)
     # A layout may have dropped the cell that had the focus.
@@ -820,7 +927,10 @@ proc main =
     fillRect(rect(0, 0, width, height), theme.actionColor)
 
     var e = default Event
-    discard waitEvent(e, 500, {WantTextInput})
+    # An index job is the one thing here that has work of its own to do: while
+    # one runs the loop only polls, so the job gets every frame instead of one
+    # every half second.
+    discard waitEvent(e, if job.active: 0 else: 500, {WantTextInput})
     case e.kind
     of QuitEvent, WindowCloseEvent:
       running = false
@@ -864,9 +974,16 @@ proc main =
     of MouseDownEvent:
       pointerX = e.x
       pointerY = e.y
+      comp.dismiss()
       let hit = cells.hitTest(e.x, e.y)
       if hit.name.len > 0:
         focus = hit.name
+    of TextInputEvent:
+      # Ctrl+Space is a command, not a space. X11 hands the app both, and the
+      # space would land in the buffer right where the completion is about to
+      # go; the key event above has already been dealt with.
+      if CtrlPressed in e.mods and e.text[0] == ' ' and e.text[1] == '\0':
+        e = default Event
     of KeyDownEvent:
       let cmd = CtrlPressed in e.mods or GuiPressed in e.mods
       if cmd and e.key == KeyS:
@@ -886,6 +1003,18 @@ proc main =
                               tabs, explorer, term, status, buffers, current,
                               panelFontSize, historyFontSize,
                               terminalFontSize, statusFontSize, editorFontSize)
+        e = default Event  # consume the event
+      elif cmd and e.key == KeySpace and focus == "editor":
+        comp.show(words, buffers[current].ed)
+        if not comp.active:
+          tabs.note = if comp.prefix.len > 0:
+                        "no word starts with '" & comp.prefix & "'"
+                      else: "no words indexed yet"
+        e = default Event  # consume the event
+      elif focus == "editor" and comp.handleKey(e, buffers[current].ed):
+        # While the listing is up a few keys belong to it. Everything else --
+        # letters, backspace, the arrows sideways -- goes to the editor as
+        # usual and narrows the listing through the prefix.
         e = default Event  # consume the event
       elif e.key == KeyEnter and focus == "tabs":
         # Enter activates a tab instead of inserting a newline.
@@ -1019,6 +1148,8 @@ proc main =
     of saveFile:
       if buffers[current].path.len > 0:
         buffers[current].ed.saveToFile(buffers[current].path)
+    of indexWords:
+      runIndexCommand(termAct, words, job, tabs.note)
     of ctrlHover:
       let (_, _, _, a, b) = term.ed.extractFilePosition(termAct.pos)
       term.ed.underline(a, b)
@@ -1048,7 +1179,13 @@ proc main =
         buffers[current].ed.saveToFile(buffers[current].path)
       focus = "editor"
       updateStatus(status, buffers[current].ed, buffers[current].path, note)
+    of indexWords:
+      runIndexCommand(statusAct, words, job, tabs.note)
     of ctrlHover, ctrlClick, noAction: discard
+
+    # The completion listing, last: it goes over everything, and it can only
+    # be placed once the editor has drawn the caret it hangs from.
+    comp.draw(words, buffers[current].ed, cells["editor"], focus == "editor")
 
     # Persist the session once everything that could have changed it has run.
     let tt = tabsText(buffers)
