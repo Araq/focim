@@ -136,6 +136,10 @@ type
     line: int             ## line number (0-based)
     color: Color          ## color indicator shown in the line number gutter
 
+  RowHighlight = object
+    line: int             ## line number (0-based), -1 for none
+    color: Color          ## background for the whole row, text or no text
+
   EditActionKind* = enum
     noAction,
     ctrlHover,          ## ctrl+mouse move over text
@@ -206,6 +210,16 @@ type
     markers: seq[Marker]
     # Line decorations (breakpoints, active execution line, etc.)
     lineDecorations: seq[LineDecoration]
+    # Row highlight -- see setRowHighlight(). One row: a list has one line
+    # that is the current thing, the way it has one cursor.
+    rowHighlight: RowHighlight
+    # The buffer range of the row `render` is painting a band behind, and the
+    # color of that band, so that the per-token backgrounds agree with it.
+    # Set per row while rendering; `(0, -1)` is "no row".
+    activeRow: tuple[a, b: int]
+    activeRowColor: Color
+    activeBand: tuple[x, w: int]  ## how wide that band is, for the rows a
+                                  ## wrapped line continues on
     # Action lines -- see setActionLines()
     actionLines*: int               ## first line whose text is framed as
                                     ## clickable; -1 = none
@@ -268,6 +282,11 @@ proc setCellStyle(s: var SynEdit; i: Natural; tc: TokenClass) =
       s.back[s.back.high - j].s = tc
 
 proc `[]`*(s: SynEdit; i: Natural): char {.inline.} = s.getCell(i).c
+
+proc tokenClassAt*(s: SynEdit; i: Natural): TokenClass {.inline.} = s.getCell(i).s
+  ## What the highlighter made of the character at `i`. The color it is drawn
+  ## in is `theme.fg` of this, which is what makes a highlighter testable
+  ## without a window: the classes are the output, the colors only a theme.
 
 proc len*(s: SynEdit): int {.inline.} = s.front.len + s.back.len
 
@@ -787,13 +806,82 @@ proc rustNextToken(g: var GeneralTokenizer) =
   g.length = pos - g.pos
   g.pos = pos
 
+proc consoleNextToken(g: var GeneralTokenizer) =
+  ## What a terminal's output is made of, as far as color goes: the word a
+  ## compiler puts in front of a message, the `[Tag]` it puts behind one, and
+  ## the shape of a diff. Ported from nimedit, whose console highlighter this
+  ## is; `git diff` is the most-read output there is, and every line of it
+  ## says with its first character what it is.
+  template fallback() =
+    g.kind = TokenClass.None
+    if pos < g.buf.len: inc pos
+
+  template wholeLine(col) =
+    # Only at the start of a line. A '-' in the middle of one is a minus sign
+    # or half of a word, and there is nothing behind it worth painting red.
+    if pos == 0 or g.buf[pos-1] == '\L':
+      g.kind = col
+      while g.buf[pos] != '\L': inc pos
+    else:
+      fallback()
+
+  var pos = g.pos
+  g.start = g.pos
+  case g.buf[pos]
+  of 'a'..'z', 'A'..'Z', '_', '/', '\\', '\x80'..'\xFF':
+    # A path is a word too: '/', '\' and '.' are taken into it, so a file name
+    # stays one token instead of coming apart into a dozen.
+    var id = ""
+    while g.buf[pos] in Letters + {'/', '\\', ':', '.'}:
+      id.add g.buf[pos].toLowerAscii
+      inc pos
+    case id
+    of "error:", "fatal:": g.kind = TokenClass.Red
+    of "warning:": g.kind = TokenClass.Yellow
+    of "hint:": g.kind = TokenClass.Green
+    else: g.kind = TokenClass.Identifier
+  of '[':
+    # `[Conf]`, `[XDeclaredButNotUsed]`: what the Nim compiler puts at the end
+    # of a message to say which kind of message it was.
+    if pos > 0 and g.buf[pos-1] == ' ' and g.buf[pos+1] in Letters:
+      inc pos
+      let rollback = pos
+      while g.buf[pos] in Letters: inc pos
+      if g.buf[pos] == ']':
+        inc pos
+        g.kind = TokenClass.Rule
+      else:
+        g.kind = TokenClass.None
+        pos = rollback
+    else:
+      fallback()
+  of '+': wholeLine(TokenClass.Green)
+  of '-': wholeLine(TokenClass.Red)
+  of '@':
+    # A hunk header, `@@ -1,4 +1,7 @@`, up to and including its closing '@@'.
+    if g.buf[pos+1] == '@':
+      g.kind = TokenClass.Directive
+      inc pos, 2
+      while g.buf[pos] != '\L':
+        if g.buf[pos] == '@' and g.buf[pos+1] == '@':
+          inc pos, 2
+          break
+        inc pos
+    else:
+      fallback()
+  else:
+    fallback()
+  g.length = pos - g.pos
+  g.pos = pos
+
 proc getNextToken(g: var GeneralTokenizer; lang: SourceLanguage) =
   case lang
-  of langNone, langConsole:
+  of langNone:
     g.start = g.pos
     if g.pos < g.buf.len: inc g.pos
     g.kind = TokenClass.None
     g.length = g.pos - g.start
+  of langConsole: consoleNextToken(g)
   of langNim: nimNextToken(g)
   of langCpp: clikeNextToken(g, cppKeywords)
   of langC: clikeNextToken(g, cKeywords)
@@ -982,6 +1070,19 @@ proc highlightLine(s: var SynEdit; oldCursor: Natural) =
   let last = i
   let initialState = if first == 0: TokenClass.None else: s.getCell(first-1).s
   s.highlight(first, last, initialState)
+
+proc highlightFrom(s: var SynEdit; pos: Natural) =
+  ## Re-highlight from the start of the line `pos` is in to the end of the
+  ## buffer. What appended output needs: a chunk of it is many lines at once,
+  ## and it may well continue the line the chunk before it ended on.
+  if s.lang == langNone or s.len == 0: return
+  if s.lang == langMarkdown:
+    s.highlightMarkdown(0, s.len - 1)
+    return
+  var first = pos.int
+  while first >= 1 and s[first-1] != '\L': dec first
+  let initialState = if first == 0: TokenClass.None else: s.getCell(first-1).s
+  s.highlight(first, s.len - 1, initialState)
 
 proc highlightEverything(s: var SynEdit) =
   if s.lang == langNone: return
@@ -2049,8 +2150,14 @@ proc appendOutput*(s: var SynEdit; text: string) =
   s.readOnly = -1
   s.gotoPos(s.len)
   s.prepareForEdit()
+  let start = s.cursor.int
   s.rawInsert(text)
-  s.highlightLine(s.cursor)
+  # Not `highlightLine`: what a program prints arrives in chunks of many lines
+  # at a time, and the last of them is usually the empty one after the final
+  # newline. Highlighting that one line would leave the output colorless --
+  # and appending does not bump `version`, so the incremental pass that walks
+  # the rest of a buffer never comes for this text either.
+  s.highlightFrom(start)
   s.readOnly = s.len - 1
 
 proc setLabel*(s: var SynEdit; text: string) =
@@ -2067,7 +2174,8 @@ proc createSynEdit*(font: Font; theme = defaultTheme()): SynEdit =
   result = SynEdit(front: @[], back: @[], actions: @[], cursor: 0,
     selected: (-1, -1), bracketA: -1, bracketB: -1, hotLink: (-1, -1),
     readOnly: -1, tabSize: TabWidth, lang: langNim,
-    actionLines: -1, closeLines: -1, closeHover: -1,
+    actionLines: -1, closeLines: -1, closeHover: -1, activeRow: (0, -1),
+    rowHighlight: RowHighlight(line: -1),
     font: font, theme: theme, flags: {},
     showLineNumbers: false, cursorVisible: true, lastBlinkTick: 0)
 
@@ -2221,11 +2329,32 @@ proc spaceForLines(s: SynEdit): int =
   else:
     result = 0
 
+proc padX(s: SynEdit): int {.inline.} = max(2, fontLineSkip(s.font) div 3)
+  ## The gap between the text and the left and right edge of the widget.
+proc padY(s: SynEdit): int {.inline.} = max(1, fontLineSkip(s.font) div 6)
+  ## The same above the first row. Both come out of the line height rather
+  ## than out of a constant, so they follow the font size and the display
+  ## scale without anybody having to remember to scale them.
+
+proc onActiveRow(s: SynEdit): bool {.inline.} = s.activeRow.b == high(int)
+  ## Whether the line being drawn is the one carrying the `activeLineBg` band.
+
+proc caretWidth(s: SynEdit): int {.inline.} = max(2, fontLineSkip(s.font) div 6)
+  ## How wide the caret bar is drawn. Out of the line height like the padding,
+  ## so it keeps its weight against the text at every font size and on every
+  ## display scale instead of thinning out to a hairline on a dense one.
+
+proc padding*(s: SynEdit): tuple[x, y: int] {.inline.} = (s.padX, s.padY)
+  ## What `render` keeps free between the text and the edges of the rect it is
+  ## given. A caller that sizes a box around a known number of lines -- the
+  ## completion listing does -- has to add it, or the last line falls outside.
+
 proc getBg(s: SynEdit; i: int): Color =
   if i <= s.selected.b and s.selected.a <= i: return s.theme.selBg
   if i == s.bracketA or i == s.bracketB: return s.theme.bracketBg
   for m in s.markers:
     if m.a <= i and i <= m.b: return m.color
+  if s.activeRow.a <= i and i <= s.activeRow.b: return s.activeRowColor
   return s.theme.bg
 
 proc underline*(s: var SynEdit; a, b: int) =
@@ -2244,6 +2373,19 @@ proc addMarker*(s: var SynEdit; a, b: int; color: Color) =
 proc clearMarkers*(s: var SynEdit) =
   ## Remove all markers.
   s.markers.setLen 0
+
+proc setRowHighlight*(s: var SynEdit; line: int; color: Color) =
+  ## Paint the whole row of `line` in `color` -- the width of the widget, not
+  ## the width of its text. This is what says "this line is the one" in a list
+  ## whose lines are things rather than sentences: a marker would stop where
+  ## the name does and leave the rest of the row looking like every other.
+  ## The cursor's own band is drawn the same way and wins where they meet.
+  ## There is one such row, as there is one cursor; `line = -1` is none.
+  s.rowHighlight = RowHighlight(line: line, color: color)
+
+proc clearRowHighlight*(s: var SynEdit) =
+  ## Take the row highlight away again.
+  s.rowHighlight.line = -1
 
 # ---------------------------------------------------------------------------
 # Line decorations -- gutter indicators (breakpoints, active line, etc.)
@@ -2290,13 +2432,6 @@ proc setCloseButtons*(s: var SynEdit; first: int) =
 
 proc closeButtonWidth(s: SynEdit): int {.inline.} =
   fontLineSkip(s.font) - 1
-
-proc drawFrame(r: Rect; color: Color) =
-  if r.w <= 0 or r.h <= 0: return
-  fillRect(rect(r.x, r.y, r.w, 1), color)
-  fillRect(rect(r.x, r.y + r.h - 1, r.w, 1), color)
-  fillRect(rect(r.x, r.y, 1, r.h), color)
-  fillRect(rect(r.x + r.w - 1, r.y, 1, r.h), color)
 
 const
   CharBufSize = 80
@@ -2414,6 +2549,12 @@ proc drawRun(db: var DrawBuf; a, b: int; fg, bg: Color) =
         db.dim.x = db.oldX
         db.dim.y += db.lineH
         if db.dim.y + db.lineH > db.maxY: break
+        # A wrapped line is one line, so its band goes on across the rows it
+        # is wrapped onto. `render` cannot paint them: it does not know how
+        # many there will be until the text has been laid out here.
+        if db.s[].onActiveRow:
+          fillRect(rect(db.s[].activeBand.x, db.dim.y, db.s[].activeBand.w,
+                        db.lineH), db.s[].activeRowColor)
 
 proc drawColorChip(db: var DrawBuf; c: Color): int =
   ## Draw the chip at the current position, return the width it occupies.
@@ -2490,7 +2631,7 @@ proc drawTextLine(s: var SynEdit; i: int; dim: var Rect; blink: bool): int =
           elif db.i == s.cursor.int:
             db.cursorDim = db.dim
           # mouse click past end of line
-          if s.clicks > 0 and s.mouseX > dim.x and
+          if s.clicks > 0 and s.mouseX >= dim.x and
              db.dim.y + db.lineH > s.mouseY and s.mouseY >= db.dim.y:
             s.cursor = db.i.Natural
             s.setCurrentLine()
@@ -2531,7 +2672,8 @@ proc drawTextLine(s: var SynEdit; i: int; dim: var Rect; blink: bool): int =
   dim.x = db.oldX
   if db.cursorDim.h > 0:
     if blink:
-      fillRect(rect(db.cursorDim.x, db.cursorDim.y, 2, db.lineH), s.theme.cursorColor)
+      fillRect(rect(db.cursorDim.x, db.cursorDim.y, s.caretWidth, db.lineH),
+               s.theme.cursorColor)
     s.cursorDim = (db.cursorDim.x, db.cursorDim.y, db.lineH)
   result = db.i + 1
 
@@ -2586,9 +2728,9 @@ proc closeButtonHit(s: SynEdit; area: Rect; x, y: int): int =
   let lineH = fontLineSkip(s.font)
   if lineH <= 0: return
   let endX = area.x + area.w -
-             (if s.scrollEnabled: ScrollBarWidth else: 0) - 1
+             (if s.scrollEnabled: ScrollBarWidth else: 0) - 1 - s.padX
   if x < endX - s.closeButtonWidth or x > endX: return
-  let line = s.firstLine.int + (y - area.y) div lineH
+  let line = s.firstLine.int + max(0, y - area.y - s.padY) div lineH
   if line < s.closeLines or line >= s.getLineCount(): return
   if s.getLineText(line).len == 0: return   # an empty line has no button
   result = line
@@ -2617,9 +2759,17 @@ proc render*(s: var SynEdit; area: Rect; showCursor: bool) =
   s.highlightIncrementally()
 
   s.cursorDim.h = 0
+  let px = s.padX
+  let py = s.padY
   let endY = area.y + area.h - 1
-  let endX = area.x + area.w - (if hasScrollBar: ScrollBarWidth else: 0) - 1
+  # `edgeX` is the widget's own inner edge, `endX` where the text has to stop:
+  # the scrollbar and the (x) buttons live against the first, everything that
+  # is read against the second.
+  let edgeX = area.x + area.w - (if hasScrollBar: ScrollBarWidth else: 0) - 1
+  let endX = edgeX - px
   var dim = area
+  dim.x = area.x + px
+  dim.y = area.y + py
   dim.w = endX
   dim.h = endY
 
@@ -2627,7 +2777,15 @@ proc render*(s: var SynEdit; area: Rect; showCursor: bool) =
 
   let spl = s.spaceForLines()
   if s.showLineNumbers:
-    dim.x = area.x + spl + 4
+    dim.x = area.x + px + spl + 4
+
+  # A click in the padding belongs to the row and the column next to it. The
+  # hit test is the drawn rectangle of each token, and the padding is by
+  # definition outside all of them, so without this the click would miss
+  # everything and fall through to the end of the buffer below.
+  if s.clicks > 0:
+    s.mouseX = max(s.mouseX, dim.x)
+    s.mouseY = max(s.mouseY, dim.y)
 
   var renderLine = s.firstLine
   var i = s.firstLineOffset.int
@@ -2644,18 +2802,42 @@ proc render*(s: var SynEdit; area: Rect; showCursor: bool) =
     blink = s.cursorVisible
 
   while dim.y + fontSize < endY and i <= s.len:
+    let thisLine = renderLine.int
+    # Two things want a band across the whole row: a row highlight the app has
+    # set, and -- while this widget has the focus -- the line the caret is on.
+    # A panel nobody is typing in has no current line worth pointing at, and
+    # six panels each pointing at one would say nothing about where the next
+    # keystroke goes; a row highlight is about the list, so it stays either way.
+    var rowBg = s.theme.bg
+    var banded = false
+    if s.rowHighlight.line == thisLine:
+      rowBg = s.rowHighlight.color
+      banded = true
+    if showCursor and thisLine == s.currentLine.int:
+      rowBg = s.theme.activeLineBg
+      banded = true
+    if banded:
+      s.activeBand = (area.x, edgeX - area.x + 1)
+      s.activeRowColor = rowBg
+      fillRect(rect(s.activeBand.x, dim.y, s.activeBand.w, lineH), rowBg)
+      # The text is drawn with a background of its own behind every glyph, so
+      # `getBg` has to answer with the band as well -- otherwise the row comes
+      # out as words in rectangles of `bg` sitting on top of it.
+      s.activeRow = (i, high(int))
+    else:
+      s.activeRow = (0, -1)
     if s.showLineNumbers:
       let num = $(renderLine + 1)
       var numColor = if renderLine == s.currentLine: s.theme.fg[TokenClass.None]
                      else: s.theme.lineNumColor
-      var numBg = s.theme.bg
+      var numBg = if banded: rowBg else: s.theme.bg
       for ld in s.lineDecorations:
         if ld.line == renderLine.int:
           # Draw a thin vertical bar on the left edge instead of a square.
           # This matches standard editors (VS Code, etc.) and avoids jagged edges.
           fillRect(rect(area.x, dim.y, 3, lineH), ld.color)
           break
-      discard drawText(s.font, area.x + 2, dim.y, num, numColor, numBg)
+      discard drawText(s.font, area.x + px, dim.y, num, numColor, numBg)
 
     var nextI = i
     var consumedRows = 1
@@ -2666,7 +2848,6 @@ proc render*(s: var SynEdit; area: Rect; showCursor: bool) =
         inc renderLine
         continue
 
-    let thisLine = renderLine.int
     let actionLine = s.actionLines >= 0 and thisLine >= s.actionLines
     let closeLine = s.closeLines >= 0 and thisLine >= s.closeLines
     let lineY = dim.y
@@ -2696,10 +2877,11 @@ proc render*(s: var SynEdit; area: Rect; showCursor: bool) =
           # The frame outlines the whole row, so the row reads as one target
           # -- and drawing it last puts its edges over the button's fill.
           # lineH - 1 keeps consecutive frames from sharing an edge.
-          drawFrame(rect(area.x, lineY, endX - area.x + 1, lineH - 1),
+          drawFrame(rect(area.x + 1, lineY, edgeX - area.x - 1, lineH - 1),
                     s.theme.actionColor)
     inc s.span, consumedRows
     inc renderLine
+  s.activeRow = (0, -1)
 
   while dim.y + fontSize < endY:
     inc dim.y, lineH

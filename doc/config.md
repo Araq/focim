@@ -104,6 +104,7 @@ has.
 |-----|----------------|
 | `(fg base? (Class "#RRGGBB" style*)*)` | text, per token class; the leading color is all of them at once |
 | `(bg ...)` | the editor background |
+| `(panelBg ...)` | the background of the panels around it: tabs, explorer, terminal, status bar |
 | `(selBg ...)` | selection background |
 | `(bracketBg ...)` | the matching bracket |
 | `(cursorColor ...)` | the caret |
@@ -115,9 +116,20 @@ has.
 | `(activeLineBg ...)` | the line the cursor is on |
 | `(actionColor ...)` | the frame around a line that acts on click |
 | `(closeColor ...)` | the `(x)` on such a line |
+| `(focusColor ...)` | the frame around the panel the keystrokes go to |
 
 Anything left out keeps the value it has in the fallback theme, so a config
-can change one color without restating the palette.
+can change one color without restating the palette. The *base* color inside
+`(fg ...)` is the exception, and the one to watch: it is every token class at
+once, so a config that names one keeps nothing of the palette it was trimmed
+down from. `(fg "#E6DFD1" (Keyword "#E5B94E"))` is an off-white editor with
+gold keywords and nothing else -- `Green`, `Yellow` and `Red` included, which
+is what the terminal colors its output by.
+
+Typing `defaults` in the prompt puts the shipped config back into the
+`[config]` tab, for one that has been edited into a corner. It is an ordinary
+edit, so `Ctrl+Z` in that tab takes it back. The terminal does not know the
+word: there it is a program's name.
 
 ## Bold and italics
 

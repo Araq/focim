@@ -54,6 +54,13 @@ directory of every open tab, and then as an abbreviation of a file in one of
 them, so `o synedit` finds `src/widgets/synedit.nim`. Ctrl+P is `open ` already
 typed into the prompt, for the muscle memory other editors have trained.
 
+`defaults`, in the prompt, puts the config the app ships with back into the
+`[config]` tab -- for a config that has been edited into a corner: a flattened
+palette, a layout with the panel one is looking for left out of it. It is an
+edit like any other, so `Ctrl+Z` in that tab brings the old config back. Only
+the prompt understands the word; in the terminal it names a program, which is
+what the terminal is for.
+
 `find`, `findall`, `next`, `prev`, `replace` and `replaceall` are the same idea
 applied to searching: no dialog, one line of text, and every match highlighted
 in place -- in the other open tabs as well. Ctrl+F, F3 and Shift+F3 are there
@@ -66,6 +73,13 @@ is never asked anything, because it is where programs run and `yes` is one of
 them. Both are the same SynEdit-backed `Terminal` widget; what makes one of
 them a prompt is that the app points its `baseDir` at the current tab and lets
 it carry a `question`.
+
+What a terminal prints is highlighted too, by the console highlighter ported
+from NimEdit: `Error:`, `Warning:` and `Hint:` take the three named colors, a
+`[Tag]` behind a compiler message reads as one, and a diff is colored by the
+first character of each line -- so `git diff` comes out in red and green with
+its hunk headers picked out, without anything in the pipe emitting an escape
+sequence.
 
 The config and the list of open tabs are stored under `getConfigDir()` in
 `focim/config.nif` and `focim/tabs.txt`, so both survive a restart.
@@ -404,16 +418,18 @@ proc renderTabs(tabs: var TabList; buffers: seq[BufferEntry]) =
   tabs.ed.gotoLine(min(line, max(0, tabs.names.len - 1)) + 1, 0)
 
 proc decorateTabs(tabs: var TabList; buffers: seq[BufferEntry]; current: int) =
-  ## Active and modified state as markers, not as text. Offsets are derived
+  ## Active and modified state as colors, not as text. Offsets are derived
   ## from the names because the text is exactly `names` joined by newlines.
   let theme = tabs.ed.theme
   tabs.ed.clearMarkers()
+  # The active tab takes the whole row, the same band the editor draws behind
+  # the line the caret is on -- a tab is the row, not the word in it, and a
+  # highlight that stops after the name makes the list look ragged instead of
+  # making one line of it stand out.
+  tabs.ed.setRowHighlight(current, theme.activeLineBg)
+  # The modified mark stays a marker: it belongs to the name, and on the
+  # active tab it has to be visible *on* the band rather than instead of it.
   var pos = 0
-  for i, n in tabs.names:
-    if i == current:
-      tabs.ed.addMarker(pos, pos + n.len - 1, theme.activeLineBg)
-    pos += n.len + 1
-  pos = 0
   for i, n in tabs.names:
     # The layout buffer never shows up here: the main loop consumes its changed
     # flag on the very next frame, which is also when it gets stored.
@@ -504,7 +520,7 @@ proc reparseConfig(src: string; width, height, lineHeight: int;
     note = "config: " & parsed.error
     return
   let cells = parsed.layout.resolve(width, height, lineHeight,
-                                    padding = scaledPx(6), gap = scaledPx(2),
+                                    padding = scaledPx(6), gap = scaledPx(4),
                                     uiScale = gUiScale)
   for name in RequiredCells:
     if name notin cells:
@@ -640,7 +656,6 @@ proc activateEntry(ex: var Explorer; idx: int;
     let p = ex.dir / name
     if fileExists(p):
       current = buffers.openFile(font, p, -1, -1)
-      setWindowTitle("focim - " & name)
       focus = "editor"
 
 # ---------------------------------------------------------------------------
@@ -717,16 +732,17 @@ proc handleTermCtrlClick(buf: SynEdit; pos: int;
   term.ed.underline(a, b)
   if dirExists(path):
     # The terminal's own idea of where it is -- the same thing `cd` moves, and
-    # what the next command is run in.
+    # what the next command is run in. It does not go in the window title: the
+    # title says which buffer is being edited, and a directory there would be
+    # a second meaning that stays until the buffer happens to change. The
+    # prompt already says where the terminal is.
     term.cwd = path
-    setWindowTitle("focim - " & path)
     term.ed.appendOutput("\L")
     term.insertPrompt()
     var lsCmd = "ls"
     discard term.runCommand(lsCmd)
   elif fileExists(path):
     current = buffers.openFile(font, path, ln, fc)
-    setWindowTitle("focim - " & path.extractFilename)
     focus = "editor"
 
 proc splitMarkdownTarget(url: string): tuple[path, frag: string] =
@@ -769,7 +785,6 @@ proc handleMarkdownCtrlClick(ed: var SynEdit; pos: int;
   let full = if isAbsolute(path): path else: base / path
   if fileExists(full):
     current = buffers.openFile(font, full, -1, -1)
-    setWindowTitle("focim - " & full.extractFilename)
     focus = "editor"
     note = ""
     if frag.len > 0 and not buffers[current].ed.gotoMarkdownHeading(frag):
@@ -901,7 +916,6 @@ proc runOpenCommand(act: TermAction; base: string;
     note = ""
   else:
     current = buffers.openFile(font, path, -1, -1)
-    setWindowTitle("focim - " & path.extractFilename)
     focus = "editor"
     note = ""
 
@@ -939,7 +953,6 @@ proc saveBufferAs(buffers: var seq[BufferEntry]; current: int; path: string;
   except OSError: discard
   buffers[current].path = full
   buffers[current].ed.applyFileKind(full)
-  setWindowTitle("focim - " & full.extractFilename)
   note = ""
 
 type
@@ -1169,6 +1182,26 @@ proc runAnswer(word: string; asked: var Ask; f: var Finder;
     note = "replaced " & $f.replaced
     asked = Ask()
 
+proc runDefaults(buffers: var seq[BufferEntry]; note: var string) =
+  ## `defaults`: put the config the app ships with back into the [config] tab.
+  ## Written as an edit rather than as a new text, so Ctrl+Z in that tab brings
+  ## a hand-written config back -- which is why this asks nothing first: what
+  ## it replaces is one keystroke away for as long as the tab is open. The
+  ## main loop does the rest, since it already reparses and stores that buffer
+  ## whenever it changed.
+  for b in buffers.mitems:
+    if b.isConfig:
+      if b.ed.fullText == defaultConfig:
+        note = "the config already is the default one"
+      elif b.ed.len > 0:
+        b.ed.replaceRange(0, b.ed.len - 1, defaultConfig)
+        note = "config back to the defaults; Ctrl+Z in [config] undoes it"
+      else:
+        b.ed.insertText(defaultConfig)
+        note = "config back to the defaults"
+      return
+  note = "there is no [config] tab to put it in"
+
 proc runSave(act: TermAction; asked: var Ask; buffers: var seq[BufferEntry];
              current: int; note: var string) =
   ## `save`, with the question it may raise.
@@ -1245,6 +1278,11 @@ proc main =
   var history = createSynEdit(font)
   var term = createTerminal(font)
   var status = createTerminal(font)
+  # What makes this one the prompt rather than a second terminal: it takes the
+  # questions (`question`), it resolves relative paths against the current tab
+  # (`baseDir`, set every frame below), and it is where a command that acts on
+  # the app itself is typed.
+  status.isPrompt = true
   var tabs = TabList(ed: createSynEdit(font))
   var explorer = Explorer(ed: createSynEdit(font))
   tabs.ed.lang = langNone
@@ -1318,6 +1356,7 @@ proc main =
     if buffers[current].path.len > 0: buffers[current].path.parentDir
     else: os.getCurrentDir())
   var lastCurrent = current
+  var lastTitle = ""
 
   var focus = "editor"
   # Where the pointer was last seen. A wheel event carries its delta in `x`
@@ -1361,14 +1400,21 @@ proc main =
     # The theme goes out to every widget every frame. Buffers come and go and
     # the colors can change with any keystroke in the config, so there is no
     # single place to hook this that could not be forgotten later.
-    history.theme = theme
-    tabs.ed.theme = theme
-    explorer.ed.theme = theme
-    term.ed.theme = theme
-    status.ed.theme = theme
-    comp.theme = theme
+    #
+    # Everything that is not the text being edited draws on `panelBg` instead
+    # of on `bg`: one color for the whole window makes a tab list, a listing
+    # and a terminal look like more of the document, and the eye has to find
+    # the seams before it can find the text.
+    var panelTheme = theme
+    panelTheme.bg = theme.panelBg
+    history.theme = panelTheme
+    tabs.ed.theme = panelTheme
+    explorer.ed.theme = panelTheme
+    term.ed.theme = panelTheme
+    status.ed.theme = panelTheme
+    comp.theme = panelTheme
     comp.setFont buffers[current].ed.getFont
-    clips.theme = theme
+    clips.theme = panelTheme
     # The prompt has no directory of its own, so a relative path typed there is
     # taken to be relative to the file being edited -- the same thing that path
     # would mean written inside that file. The terminal has a `cwd` and a `cd`
@@ -1418,7 +1464,7 @@ proc main =
         job = IndexJob()
 
     let cells = layout.resolve(width, height, fm.lineHeight,
-                               padding = scaledPx(6), gap = scaledPx(2),
+                               padding = scaledPx(6), gap = scaledPx(4),
                                uiScale = gUiScale)
 
     # Only ever one question is outstanding, and anything the user starts
@@ -1589,7 +1635,6 @@ proc main =
           elif full.len > 0 and fileExists(full):
             current = buffers.openFile(fonts.fontForSize(editorFontSize),
                                        full, -1, -1)
-            setWindowTitle("focim - " & full.extractFilename)
             focus = "editor"
           elif explorer.entries.len > 0:
             # A partial name accepts the first match.
@@ -1645,6 +1690,18 @@ proc main =
           elif explorer.ed.getLineCount() != explorer.entries.len + 1:
             # The listing itself is not editable; put it back.
             explorer.renderExplorer(explorer.header, explorer.ed.cursor)
+
+    # The window title says which buffer is in the editor, out of the same
+    # names the tab list shows -- so the two cannot disagree, and a name that
+    # had to be made unique ("doc/config.md") is unique in the title too.
+    #
+    # Driven by what *is* current rather than set wherever something gets
+    # opened: the current buffer also changes by switching tabs, by closing
+    # one, and by undoing that, and none of those go through an open.
+    let title = if current < tabs.names.len: tabs.names[current] else: ""
+    if title != lastTitle:
+      lastTitle = title
+      setWindowTitle(if title.len > 0: "focim - " & title else: "focim")
 
     # The explorer follows the directory of the active file.
     if current != lastCurrent:
@@ -1733,6 +1790,10 @@ proc main =
       discard
     of indexWords:
       runIndexCommand(termAct, words, job, tabs.note)
+    of resetConfig:
+      # Unreachable: `defaults` is the prompt's command, and this is the
+      # terminal -- there the word is a program's name.
+      discard
     of ctrlHover:
       let (_, _, _, a, b) = term.ed.extractFilePosition(termAct.pos)
       term.ed.underline(a, b)
@@ -1787,11 +1848,29 @@ proc main =
       redrawStatus()
     of indexWords:
       runIndexCommand(statusAct, words, job, tabs.note)
+    of resetConfig:
+      runDefaults(buffers, tabs.note)
+      redrawStatus()
     of ctrlHover, ctrlClick, noAction: discard
 
     # The completion listing, last: it goes over everything, and it can only
     # be placed once the editor has drawn the caret it hangs from.
     comp.draw(words, buffers[current].ed, cells["editor"], focus == "editor")
+
+    # Which panel the next keystroke goes to, said once and in one place. The
+    # frame lands in the gap the layout leaves between the cells -- half of it
+    # per side, so two neighbours cannot both claim the same pixel -- and
+    # therefore takes no room from the widget and cannot move its text.
+    if focus in cells:
+      # Clamped to the window: a cell against an edge has no gap on that side,
+      # and a frame drawn past it would simply not be there.
+      let f = cells[focus]
+      let fw = scaledPx(2)
+      let x0 = max(0, f.x - fw)
+      let y0 = max(0, f.y - fw)
+      let x1 = min(width - 1, f.x + f.w - 1 + fw)
+      let y1 = min(height - 1, f.y + f.h - 1 + fw)
+      drawFrame(rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1), theme.focusColor, fw)
 
     # Persist the session once everything that could have changed it has run.
     let tt = tabsText(buffers)
