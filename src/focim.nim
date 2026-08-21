@@ -50,9 +50,12 @@ buffer rather than on the machine: `o <file>` / `open <file>` opens one, `s` /
 relative path means what it would mean where it was typed: in the terminal,
 relative to the directory the terminal is in; on the prompt, relative to the
 file being edited. A name that is not found as written is looked for in the
-directory of every open tab, and then as an abbreviation of a file in one of
-them, so `o synedit` finds `src/widgets/synedit.nim`. Ctrl+P is `open ` already
-typed into the prompt, for the muscle memory other editors have trained.
+directory of every open tab, then as an abbreviation of a file in one of them,
+and then in the *project* those directories are in -- so `o synedit` finds
+`src/widgets/synedit.nim`, and `o xelim.nim` finds `src/hexer/xelim.nim` with
+nothing but `nimony/README.md` open. See `doc/focim/open.md`. Ctrl+P is
+`open ` already typed into the prompt, for the muscle memory other editors
+have trained.
 
 `defaults`, in the prompt, puts the config the app ships with back into the
 `[config]` tab -- for a config that has been edited into a corner: a flattened
@@ -64,7 +67,7 @@ what the terminal is for.
 `find`, `findall`, `next`, `prev`, `replace` and `replaceall` are the same idea
 applied to searching: no dialog, one line of text, and every match highlighted
 in place -- in the other open tabs as well. Ctrl+F, F3 and Shift+F3 are there
-for the fingers that expect them. See `doc/search.md`.
+for the fingers that expect them. See `doc/focim/search.md`.
 
 A command that has to ask something -- overwriting a file, replacing a match --
 puts the question in the status bar and moves the caret there: the next line
@@ -102,13 +105,20 @@ leaving the editor.
 Ctrl+Space completes a word. There is no compiler in the loop and nothing
 here knows what a name *means*; what it knows is which names exist -- in the
 open buffers, in a directory that `index <path>` was pointed at, and in the
-Nimony vocabulary that ships with the editor. See `doc/completion.md`.
+Nimony vocabulary that ships with the editor. See `doc/focim/completion.md`.
+
+Ctrl+click on a name in a `.nim` file is the one place a compiler *is* in the
+loop: `nim track` (or nimony) is asked where the name is declared and where it
+is used, and the answer comes back as the same listing Ctrl+Space uses -- one
+row per place, Enter to go there. The compiler runs in a thread, so the window
+stays a window while it thinks. `(track (compiler "nim"))` in the config says
+which compiler, and `"none"` says nobody. See `doc/focim/track.md`.
 
 The `clipboard` cell keeps what the clipboard held. A system clipboard holds
 one thing, so copying twice before pasting once loses the first -- here the
 last thirty texts that entered it stay, from this application or from any
 other, numbered, and Ctrl+1 .. Ctrl+9 paste one at the caret. See
-`doc/clipboard.md`.
+`doc/focim/clipboard.md`.
 
 Icon: `focim-icon.png` is the source art, and the files built from it that are
 checked in next to it -- `focim-icon.netwm` for X11, `focim.ico` / `.rc` /
@@ -136,7 +146,9 @@ from std/strutils import toLowerAscii, strip, endsWith, contains, splitLines,
 from std/cmdline import paramCount, paramStr
 import uirelays
 import uirelays/layout
-import widgets/[synedit, terminal, config, wordindex, cliphistory, search]
+import widgets/[synedit, terminal, config, wordindex, cliphistory, search,
+                filesearch]
+import focim/track
 import completion
 
 # Derived from focim-icon.png by `iconbundler --prepare focim`.
@@ -171,7 +183,8 @@ const defaultConfig = """
         (history (lines 5))
         (terminal)))
     (status (lines 1)))
-  # Anything left out keeps the color it has; `doc/config.md` lists the fields.
+  # Anything left out keeps the color it has; `doc/focim/config.md` lists
+  # the fields.
   # Every token class is written out below, so any of them can be recolored by
   # editing the line rather than by first finding out that the class exists.
   # A color may be followed by (bold), by (italics), or by both.
@@ -216,7 +229,11 @@ const defaultConfig = """
       (Green "#4FBF9F")               # the three the terminal colors by name
       (Yellow "#E5B94E")
       (Red "#E4634A")
-      (MarkdownFence "#7A7365"))))
+      (MarkdownFence "#7A7365")))
+  # Who answers a Ctrl+click on a name: "nim", "nimony", or "none" for nobody.
+  # (exe "...") names the binary when it is not simply on the PATH.
+  (track
+    (compiler "nim")))
 """
 
 const
@@ -239,6 +256,12 @@ const
     ## paid for once and not on every start.
   ShippedWords = "nimony.txt"
     ## The vocabulary that comes with the editor, next to the binary.
+  MaxPreviewChars = 60
+    ## How much of a line a tracking row quotes. A row is a thing to recognize
+    ## a place by, not a place to read the code in.
+  MaxPreviewBytes = 4_000_000
+    ## Above this a file is not read for a one-line quote. Nothing anyone wrote
+    ## by hand is that big, and the row is worth less than the pause would be.
 
 proc configPath(name: string): string =
   getConfigDir() / ConfigDirName / name
@@ -519,7 +542,8 @@ proc applyTabEdits(tabs: var TabList; buffers: var seq[BufferEntry];
     if n == currentName: current = i
 
 proc reparseConfig(src: string; width, height, lineHeight: int;
-                   layout: var Layout; theme: var Theme; note: var string) =
+                   layout: var Layout; theme: var Theme; track: var Track;
+                   note: var string) =
   ## The config buffer's text IS the window. A config that does not parse, or
   ## that loses a cell the app needs, is reported and dropped -- the last good
   ## one keeps the window usable so the text can be corrected. A theme that
@@ -538,6 +562,7 @@ proc reparseConfig(src: string; width, height, lineHeight: int;
       return
   layout = parsed.layout
   theme = parsed.theme
+  track = parsed.track
   note = parsed.note
 
 # ---------------------------------------------------------------------------
@@ -806,6 +831,94 @@ proc handleMarkdownCtrlClick(ed: var SynEdit; pos: int;
   else:
     note = "not found: " & full
 
+# ---------------------------------------------------------------------------
+# Tracking -- where a name is declared and where it is used, per the compiler
+# ---------------------------------------------------------------------------
+
+proc startTrack(tracker: var Tracker; spec: Track; ed: var SynEdit; pos: int;
+                path: string; note: var string) =
+  ## What a Ctrl+click on a name in a `.nim` buffer asks for. The click has
+  ## already put the caret in the name; the *start* of the name is what gets
+  ## asked about, so that clicking anywhere in it is the same question.
+  let (word, a, b) = ed.wordAt(pos)
+  if word.len == 0:
+    note = "nothing to look up here"
+    return
+  ed.underline(a, b)
+  let (line, col) = ed.lineAndByteCol(a)
+  discard tracker.start(spec, path, line, col, word)
+  note = tracker.note
+
+proc shortPath(path, base: string): string =
+  ## What a row calls a file. Inside the project it is the path from the
+  ## project down, which is how one talks about one's own files; outside it --
+  ## the standard library, another package -- the last directory and the name,
+  ## since the absolute path would be the widest thing in the listing and the
+  ## least worth reading.
+  if base.len > 0 and path.len > base.len and path.startsWith(base) and
+     path[base.len] == DirSep:
+    result = path[base.len + 1 .. ^1]
+  else:
+    let parent = path.parentDir.lastPathPart
+    result = if parent.len > 0: parent & "/" & path.extractFilename
+             else: path.extractFilename
+
+proc sourceLine(path: string; line: int; buffers: seq[BufferEntry];
+                cache: var Table[string, seq[string]]): string =
+  ## Line `line` of `path`, for the row that offers to go there. An open buffer
+  ## answers first: it is what the file *is* right now, and an unsaved edit is
+  ## exactly the case where the text on disk would be misleading. Everything
+  ## else is read once per file, however many rows point into it.
+  for b in buffers:
+    if b.path == path and not b.isConfig:
+      return b.ed.getLineText(line - 1).strip
+  if path notin cache:
+    var lines: seq[string] = @[]
+    try:
+      if getFileSize(path) <= MaxPreviewBytes:
+        lines = readFile(path).splitLines
+    except CatchableError:
+      discard
+    cache[path] = lines
+  let lines = cache[path]
+  result = if line >= 1 and line <= lines.len: lines[line - 1].strip else: ""
+
+proc trackRows(hits: seq[TrackHit]; base: string;
+               buffers: seq[BufferEntry]): seq[string] =
+  ## One row per place: what it is, where it is, and what stands there. The
+  ## `where` column is padded to a common width so that the source text lines
+  ## up and the eye can run down it.
+  var cache = initTable[string, seq[string]]()
+  var where: seq[string] = @[]
+  var widest = 0
+  for h in hits:
+    let w = (if h.isDef: "def " else: "use ") & shortPath(h.path, base) &
+            ":" & $h.line
+    where.add w
+    widest = max(widest, w.len)
+  result = @[]
+  for i, h in hits:
+    var row = where[i]
+    while row.len < widest: row.add ' '
+    let src = sourceLine(h.path, h.line, buffers, cache)
+    if src.len > 0:
+      row.add "  "
+      row.add(if src.len > MaxPreviewChars: src[0 ..< MaxPreviewChars] & "..."
+              else: src)
+    result.add row
+
+proc jumpTo(hit: TrackHit; buffers: var seq[BufferEntry]; current: var int;
+            font: Font; focus: var string; note: var string) =
+  ## Go where a row points. The answer is as old as the query that produced it,
+  ## so the file may be gone by now -- which is a note, not a crash.
+  if not fileExists(hit.path):
+    note = "gone since the compiler saw it: " & hit.path
+    return
+  current = buffers.openFile(font, hit.path, -1, -1)
+  buffers[current].ed.gotoLineBytes(hit.line, hit.col)
+  focus = "editor"
+  note = ""
+
 proc updateStatus(status: var Terminal; ed: SynEdit; path, note: string) =
   let name = if path.len > 0: path.extractFilename else: "[scratch]"
   let info = name & "  Ln " & $(ed.currentLine + 1) &
@@ -860,35 +973,29 @@ proc searchDirs(buffers: seq[BufferEntry]; base: string): seq[string] =
       let d = normDir(b.path.parentDir)
       if d notin result and dirExists(d): result.add d
 
-proc abbrevMatch(dir, name: string): string =
-  ## The file in `dir` that `name` is an abbreviation of, or "". A name that
-  ## the listing *starts* with wins over one that merely contains it, and among
-  ## equals the alphabetically first -- the answer must not depend on the order
-  ## the file system happens to hand out.
-  var starts: seq[string] = @[]
-  var inside: seq[string] = @[]
-  let n = name.toLowerAscii
-  for kind, p in walkDir(dir):
-    if kind notin {pcFile, pcLinkToFile}: continue
-    let f = p.extractFilename
-    # `'.' in f`: a source file has an extension, and a name without one is
-    # far more often a binary that got built here than the file that was meant.
-    if f.ignoreFile or '.' notin f: continue
-    let l = f.toLowerAscii
-    if l.startsWith(n): starts.add f
-    elif n in l: inside.add f
-  sort starts
-  sort inside
-  if starts.len > 0: result = dir / starts[0]
-  elif inside.len > 0: result = dir / inside[0]
-  else: result = ""
-
-proc findFileSmart(buffers: seq[BufferEntry]; base, arg: string): string =
-  ## nimedit's `findFile` followed by its `findFileAbbrev`: the path as given,
-  ## then the same name in a directory this session has a file open in, and
-  ## only then a file whose name merely *contains* what was typed -- so that
-  ## `o synedit` finds `src/widgets/synedit.nim` from anywhere in the tree.
-  ## Directories are found too; the caller decides what to do with one.
+proc findFileSmart(buffers: seq[BufferEntry]; base, arg: string;
+                   truncated: var bool): string =
+  ## Three questions, cheapest first, each asked only because the one before it
+  ## said no:
+  ##
+  ## 1. the path as given, against the directory the command was typed in and
+  ##    the directory of every open tab -- nimedit's `findFile`;
+  ## 2. the *listings* of those same directories, for a name with pieces
+  ##    missing -- nimedit's `findFileAbbrev`, one `walkDir` each;
+  ## 3. the projects those directories are in, walked.
+  ##
+  ## The first two look at a handful of directories and answer instantly. What
+  ## they cannot answer is a project that has any shape to it: with only
+  ## `nimony/README.md` open, `xelim.nim` is three directories away in
+  ## `src/hexer/` and no list of open directories will ever hold it. That is
+  ## what the walk is for, and why it is last -- it is the only step that costs
+  ## anything, and by the time it runs the cheap answers have all said no.
+  ##
+  ## Steps 2 and 3 are the same ranking over a different scope, so the quick
+  ## search and the thorough one can never disagree about which of two files
+  ## was meant. Directories are found too; the caller decides what to do with
+  ## one.
+  truncated = false
   if arg.len == 0: return ""
   let e = expandTilde(arg)
   if isAbsolute(e):
@@ -897,13 +1004,13 @@ proc findFileSmart(buffers: seq[BufferEntry]; base, arg: string): string =
   for d in dirs:
     let p = d / e
     if fileExists(p) or dirExists(p): return p
-  # Only a bare name is guessed at: `sub/dir/thing` was meant to be a path, and
-  # answering it with a file from somewhere else would be a surprise.
-  if e.parentDir.len == 0:
-    for d in dirs:
-      let p = abbrevMatch(d, e)
-      if p.len > 0: return p
-  result = ""
+  result = findInTrees(dirs, dirs, e, truncated, recurse = false)
+  if result.len > 0: return
+  var roots: seq[string] = @[]
+  for d in dirs:
+    let r = searchRoot(d)
+    if r.len > 0 and r notin roots: roots.add r
+  result = findInTrees(roots, dirs, e, truncated)
 
 proc runOpenCommand(act: TermAction; base: string;
                     buffers: var seq[BufferEntry]; current: var int;
@@ -915,10 +1022,12 @@ proc runOpenCommand(act: TermAction; base: string;
   # `act.file` is what the widget resolved; anything smarter than that is this
   # application's business, because only it knows which files are open.
   var path = act.file
+  var truncated = false
   if not fileExists(path) and not dirExists(path):
-    path = findFileSmart(buffers, base, act.arg)
+    path = findFileSmart(buffers, base, act.arg, truncated)
   if path.len == 0:
-    note = "cannot open: " & act.arg
+    note = "cannot open: " & act.arg &
+      (if truncated: " -- and the tree was too big to search all of it" else: "")
   elif dirExists(path):
     # A directory is not a buffer; it is what the explorer is for.
     explorer.showDir(path)
@@ -1319,14 +1428,15 @@ proc main =
   # no longer works -- then the default, with the reason in the status bar.
   var layout = default(Layout)
   var theme = defaultTheme()
+  var trackSpec = defaultTrack()
   var configNote = ""
   reparseConfig(defaultConfig, width, height, fm.lineHeight, layout, theme,
-                configNote)
+                trackSpec, configNote)
   doAssert configNote.len == 0, configNote
   var configText = loadConfig("config.nif")
   if configText.len > 0:
     reparseConfig(configText, width, height, fm.lineHeight, layout, theme,
-                  configNote)
+                  trackSpec, configNote)
     if configNote.len > 0:
       # Whatever was wrong with it, the stored text stays in the buffer: it is
       # what has to be corrected. Until it parses the window runs on the
@@ -1393,6 +1503,12 @@ proc main =
   var finder = Finder()
   var asked = Ask()
 
+  # The outstanding "where is this name?", and the places its answer named.
+  # `jumps` outlives the listing that offers them by exactly one keystroke: the
+  # listing hands back a row number and this is what turns one into a place.
+  var tracker = Tracker()
+  var jumps: seq[TrackHit] = @[]
+
   var running = true
   while running:
     # Pick up edits to the config buffer before resolving, so that the rects
@@ -1403,7 +1519,7 @@ proc main =
       if b.isConfig and b.ed.changed:
         let src = b.ed.fullText
         reparseConfig(src, width, height, fm.lineHeight, layout, theme,
-                      configNote)
+                      trackSpec, configNote)
         if configNote.len == 0: saveConfig("config.nif", src)
         b.ed.markSaved()
 
@@ -1473,6 +1589,27 @@ proc main =
           (if job.truncated: ", stopped at " & $MaxIndexFiles & " files" else: "")
         job = IndexJob()
 
+    # The compiler answers frames after the click that asked it, which is the
+    # whole point of asking in a thread -- so nothing here may assume the
+    # editor still looks the way it did when the question was put.
+    tracker.update()
+    if tracker.note.len > 0:
+      tabs.note = tracker.note
+      tracker.note = ""
+    if tracker.ready:
+      tracker.ready = false
+      jumps = tracker.hits
+      if jumps.len == 1:
+        # One place is not a choice. A listing of it would be a keystroke
+        # asking which of the one.
+        jumpTo(jumps[0], buffers, current, fonts.fontForSize(editorFontSize),
+               focus, tabs.note)
+        jumps.setLen 0
+      else:
+        comp.choose(trackRows(jumps, tracker.project.parentDir, buffers),
+                    buffers[current].ed)
+        focus = "editor"
+
     let cells = layout.resolve(width, height, fm.lineHeight,
                                padding = scaledPx(6), gap = scaledPx(4),
                                uiScale = gUiScale)
@@ -1498,8 +1635,12 @@ proc main =
     var e = default Event
     # An index job is the one thing here that has work of its own to do: while
     # one runs the loop only polls, so the job gets every frame instead of one
-    # every half second.
-    discard waitEvent(e, if job.active: 0 else: 500, {WantTextInput})
+    # every half second. A compiler answering a Ctrl+click has work of its own
+    # too, but it is doing it in another thread and all this one has to do is
+    # notice -- often enough that the answer feels like it belongs to the
+    # click, rarely enough to cost nothing while the compiler thinks.
+    discard waitEvent(e, if job.active: 0 elif tracker.busy: 50 else: 500,
+                      {WantTextInput})
     case e.kind
     of QuitEvent, WindowCloseEvent:
       running = false
@@ -1628,6 +1769,12 @@ proc main =
         # While the listing is up a few keys belong to it. Everything else --
         # letters, backspace, the arrows sideways -- goes to the editor as
         # usual and narrows the listing through the prefix.
+        let pick = comp.chosen
+        if pick >= 0 and pick < jumps.len:
+          # A listing of places rather than of words: taking a row goes there.
+          jumpTo(jumps[pick], buffers, current,
+                 fonts.fontForSize(editorFontSize), focus, tabs.note)
+          jumps.setLen 0
         e = default Event  # consume the event
       elif e.key == KeyEnter and focus == "tabs":
         # Enter activates a tab instead of inserting a newline.
@@ -1728,12 +1875,21 @@ proc main =
         handleMarkdownCtrlClick(buffers[current].ed, edAct.pos, buffers,
                                 current, fonts.fontForSize(editorFontSize),
                                 focus, tabs.note, explorer)
-      # else: language server lookup at edAct.pos
+      elif buffers[current].ed.lang == langNim:
+        # Where is this name? Only a compiler knows, so one is asked -- and the
+        # answer arrives some frames from now, at the top of the loop.
+        startTrack(tracker, trackSpec, buffers[current].ed, edAct.pos,
+                   buffers[current].path, tabs.note)
     of ctrlHover:
       if buffers[current].ed.lang == langMarkdown:
         let (_, a, b) = buffers[current].ed.markdownLinkAt(edAct.pos)
         buffers[current].ed.underline(a, b)
-      # else: underline identifier at edAct.pos
+      elif buffers[current].ed.lang == langNim:
+        # The name under the pointer is what the click would ask about, so it
+        # is what gets underlined -- the same promise the markdown links make.
+        let (word, a, b) = buffers[current].ed.wordAt(edAct.pos)
+        if word.len > 0: buffers[current].ed.underline(a, b)
+        else: buffers[current].ed.underline(-1, -1)
     of closeLine:
       discard # the editor has no close buttons
     of noAction:
