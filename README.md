@@ -20,6 +20,15 @@ window -- and because it is the one the mouse writes: the gaps between the
 panels are grips, and dragging one rewrites the sizes in `layout.nif`, in the
 units they were written in.
 
+The window is not one editor and one terminal either. Put the pointer in a
+panel and it offers two buttons that make another one beside or below it, and
+an `x` that takes it away again -- and all three do their work by editing
+`layout.nif`, so a panel is undone with `Ctrl+Z` in the tab that holds it and
+conjured by typing `(editor2)` into the file. Two editor panels may show the
+same buffer at different lines, which makes editing one file as convenient as
+editing two: they share the text, the undo history and the search hits, and
+keep their own caret and their own view of it.
+
 The same idea runs through the rest of it. There is no tab bar and no tree
 view: the list of open tabs is an edit field whose lines are the tabs, so
 deleting a line closes one, moving a line reorders them and `Ctrl+Z` reopens

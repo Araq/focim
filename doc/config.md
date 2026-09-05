@@ -130,6 +130,83 @@ other edit of it is. What is written is the tree: a comment *inside* the
 layout does not survive a drag, though the block of comment at the top of the
 file does.
 
+## Panels
+
+An `editor` cell is an editor panel. So is `editor2`, and so is `editor3`: a
+name is a stem and a number, the first one going without because a window with
+one editor in it should not have to explain itself. `terminal` and `terminal2`
+are the same arrangement for terminals. Every other cell name is one widget,
+the only one of its kind.
+
+Put the pointer in a panel and three buttons appear in its top right corner,
+over the text and gone again the moment the pointer leaves:
+
+| Button | What it does |
+|--------|--------------|
+| a box with a `+` at its right | a panel beside this one |
+| a box with a `+` underneath | a panel below this one |
+| `x` | this panel goes away |
+
+The two split buttons are on editor and terminal panels, since those are the
+ones there can be two of. The `x` is on every panel: taking the explorer or
+the clipboard out of the window is a thing the layout file could always say,
+and the button is a quicker way of saying it. The last editor panel stays --
+without one there would be nowhere to type the layout back.
+
+`split right`, `split down` and `unsplit` in the prompt do the same three
+things to the editor panel that was last typed in.
+
+None of it is stored anywhere except in `layout.nif`. A split is an edit of
+the layout: the same edit a drag makes, written into the `[layout]` tab as one
+change, so `Ctrl+Z` there takes a panel back and typing `(editor2)` into the
+file by hand puts one there. The room for the new panel comes out of the panel
+being split and out of nothing else -- halved in whatever unit that panel was
+written in -- so splitting one panel does not shove the rest of the window
+about.
+
+```
+(layout                          (layout
+  (cols                            (cols
+    (editor)         split →         (cols
+    (terminal)))                       (editor)
+                                       (editor2))
+                                     (terminal)))
+```
+
+A split only nests where it has to. Splitting a panel to the right when its
+container already runs left to right puts the newcomer in beside it, so the
+file does not grow a `cols` for every click.
+
+Eight panels of a kind is the ceiling, and a layout that names more is refused
+with the rest of them: every open buffer keeps a seat for every panel that
+might show it.
+
+## Two panels, one file
+
+Two editor panels may show the same buffer, and mostly do -- a fresh one shows
+what the panel it was split out of shows, at the same line and with the caret
+in the same place. Scroll one of them away and there are two windows onto one
+file: the top of it and the bottom of it, or the call and what it calls, edited
+in either.
+
+What they share is the file, and that means all of it: type in one and the
+letters appear in the other as they are typed, undo in either takes back what
+was done in the other, a search lights up its hits in both. What each panel
+keeps to itself is where it is looking -- its own top line, its own caret, its
+own selection. An edit made in one carries the other's caret along with the
+text it was sitting behind, so the panel you are not typing in does not drift.
+
+Closing a panel closes a *panel*. The file stays open, its tab stays in the
+tab list, and another panel goes on showing it. Closing a terminal panel is
+even quieter: what is in a terminal is a shell's session, so the panel is put
+away rather than emptied, and the same cell name in the layout brings it back
+with everything it had -- a program halfway through running included.
+
+Two things they do not divide up: `Ctrl+plus` in an editor panel resizes the
+text in every editor panel, since the font belongs to the buffer; and one
+program runs at a time across all terminal panels, the second panel to ask
+being told so rather than queued behind it.
+
 # The theme
 
 `config.nif`, and the `[config]` tab, along with `(track ...)` below.

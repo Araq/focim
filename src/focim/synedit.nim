@@ -73,6 +73,11 @@ type
 const
   Letters* = {'a'..'z', 'A'..'Z', '0'..'9', '_', '\128'..'\255'}
   TabWidth = 2
+  MaxViews* = 8
+    ## How many panels may show one buffer at once. Every buffer carries a
+    ## seat for each of them (see `ViewSlot`), so this is a handful of words
+    ## per open file -- and eight windows onto one text is already more than
+    ## a screen can usefully hold.
 
   additionalIndentChars: array[SourceLanguage, set[char]] = [
     langNone: {},
@@ -164,6 +169,49 @@ type
     path: string
     img: Image
 
+  ViewSlot = object
+    ## Where one panel is sitting in this buffer.
+    ##
+    ## A buffer can be shown in more than one place at once -- two panels on
+    ## one file, at different lines -- and what differs between them is only
+    ## this much: where the caret is, what is selected, which line is at the
+    ## top, what the pointer is doing. The text, the undo history, the search
+    ## hits, the font and the colors belong to the buffer and are shared,
+    ## which is what makes two panels on one file worth having in the first
+    ## place -- and is why `Ctrl+plus` in one panel resizes the text in all of
+    ## them. The day that has to be per panel, the font moves in here and the
+    ## public `flags` and `showLineNumbers` fields become setters that write
+    ## every seat; until then a field nothing can intercept must not be one a
+    ## seat carries a stale copy of.
+    ##
+    ## The seats live in the *buffer* and not in whoever draws it, because
+    ## only the buffer knows when the text under them moves: type in one panel
+    ## and the carets of the others are behind the edit as surely as the text
+    ## is, and nobody else is in a position to notice. `noteEdit` moves them.
+    cursor: Natural
+    firstLine, currentLine: Natural
+    firstLineOffset: Natural
+    editLow: int
+    span: int
+    desiredCol: Natural
+    selected: tuple[a, b: int]
+    hotLink: tuple[a, b: int]
+    bracketA, bracketB: int
+    followCaret: bool
+    cursorDim: tuple[x, y, h: int]
+    mouseX, mouseY, clicks: int
+    mouseDragging: bool
+    dragStartPos: int
+    scrollGrabbed: bool
+    scrollGrabOffset: int
+    probeX, probeY: int
+    probeActive: bool
+    probeResult: int
+    closeHover: int
+    stamp: int          ## `cacheId` when this seat was last got up from, so
+                        ## that a panel coming back to a buffer that changed
+                        ## while it was away knows to count its line again
+
   SynEdit* = object
     # Gap buffer
     front, back: seq[Cell]
@@ -254,6 +302,12 @@ type
     imageCache: seq[ImageCacheEntry]
     # Cache
     offsetToLineCache: array[20, tuple[version, offset, line: int]]
+    # The panels showing this buffer. The one that is drawing or being typed
+    # in has its seat up in the fields above -- that is what keeps the other
+    # 3500 lines of this file from having to know that there is more than one
+    # -- and the rest are sitting here. See `enter`.
+    stowed: array[MaxViews, ViewSlot]
+    slot: int
 
 # ---------------------------------------------------------------------------
 # Public read-only accessors
@@ -1214,8 +1268,19 @@ proc setFirstLine(s: var SynEdit; line: int) =
   s.firstLineOffset = s.getLineOffset(s.firstLine).Natural
   s.editLow = high(int)
 
-proc noteEdit(s: var SynEdit; at: int) {.inline.} =
-  ## Text was inserted or removed at `at`, so everything behind it has moved.
+proc shifted(p, at, delta: int): int {.inline.} =
+  ## Where a position that was at `p` ends up once `delta` characters have
+  ## appeared at `at` -- or disappeared from there, when it is negative. A
+  ## position in front of the edit does not move, and one inside a stretch
+  ## that was deleted lands where the stretch was. A negative `p` is one of
+  ## the "there is none" markers and stays one.
+  if p < at or p < 0: p
+  elif delta >= 0: p + delta
+  else: max(at, p + delta)
+
+proc noteEdit(s: var SynEdit; at, delta: int) =
+  ## `delta` characters were inserted at `at`, or removed from there if it is
+  ## negative, so everything behind it has moved.
   ##
   ## Unless there is nothing behind it. An edit at the very end of the buffer
   ## -- which is every character a program prints -- moves nothing that was
@@ -1224,7 +1289,32 @@ proc noteEdit(s: var SynEdit; at: int) {.inline.} =
   ## all over again, and that is a walk from the start of the buffer. A
   ## `git log -p` of forty thousand lines did nine and a half *billion* bytes
   ## of walking that way, which is most of the seven seconds it took.
-  if at < s.len and at < s.editLow: s.editLow = at
+  ##
+  ## The panels not drawing this buffer at the moment are sitting in `stowed`,
+  ## and the text moved out from under them too. Their carets go with it here,
+  ## because here is the only place that knows: a panel is handed the buffer
+  ## again frames later, with no way of telling what happened to it in the
+  ## meantime. Eight seats is a short loop, and it saves every one of them a
+  ## walk from the top of the buffer to find out.
+  if at >= s.len: return
+  if at < s.editLow: s.editLow = at
+  for j in 0 ..< MaxViews:
+    if j == s.slot: continue
+    template seat: untyped = s.stowed[j]
+    if at < seat.editLow: seat.editLow = at
+    if delta != 0:
+      seat.cursor = Natural(shifted(seat.cursor.int, at, delta))
+      seat.dragStartPos = shifted(seat.dragStartPos, at, delta)
+      seat.selected.a = shifted(seat.selected.a, at, delta)
+      seat.selected.b = shifted(seat.selected.b, at, delta)
+      if seat.selected.b < seat.selected.a: seat.selected = (-1, -1)
+      seat.hotLink.a = shifted(seat.hotLink.a, at, delta)
+      seat.hotLink.b = shifted(seat.hotLink.b, at, delta)
+      if seat.hotLink.b < seat.hotLink.a: seat.hotLink = (-1, -1)
+      # A bracket is matched against the text that was there; the pair is
+      # found again the next time that panel's caret moves.
+      seat.bracketA = -1
+      seat.bracketB = -1
 
 proc syncFirstLine(s: var SynEdit) =
   ## `firstLine` is a line number and `firstLineOffset` is the position that
@@ -1245,6 +1335,92 @@ proc syncFirstLine(s: var SynEdit) =
 proc setCurrentLine(s: var SynEdit) =
   s.currentLine = s.getLineFromOffset(s.cursor)
   s.currentLine = clamp(s.currentLine, 0, s.numberOfLines)
+
+# ---------------------------------------------------------------------------
+# Seats. The panel that is drawing the buffer, or being typed into, has its
+# view up in the widget's own fields; the others are stowed. Everything else
+# in this file goes on reading `s.cursor` and `s.firstLine` and never learns
+# that a second panel exists -- which is the point: a document and a view
+# pulled apart into two types would have been the same idea spelled across
+# every proc in three thousand lines.
+# ---------------------------------------------------------------------------
+
+template eachSeatField(s, v, carry: untyped) =
+  ## What belongs to a panel rather than to the buffer, said once. Both
+  ## directions go through this list, so a field cannot be remembered on the
+  ## way out and forgotten on the way back in.
+  carry(s.cursor, v.cursor)
+  carry(s.firstLine, v.firstLine)
+  carry(s.currentLine, v.currentLine)
+  carry(s.firstLineOffset, v.firstLineOffset)
+  carry(s.editLow, v.editLow)
+  carry(s.span, v.span)
+  carry(s.desiredCol, v.desiredCol)
+  carry(s.selected, v.selected)
+  carry(s.hotLink, v.hotLink)
+  carry(s.bracketA, v.bracketA)
+  carry(s.bracketB, v.bracketB)
+  carry(s.followCaret, v.followCaret)
+  carry(s.cursorDim, v.cursorDim)
+  carry(s.mouseX, v.mouseX)
+  carry(s.mouseY, v.mouseY)
+  carry(s.clicks, v.clicks)
+  carry(s.mouseDragging, v.mouseDragging)
+  carry(s.dragStartPos, v.dragStartPos)
+  carry(s.scrollGrabbed, v.scrollGrabbed)
+  carry(s.scrollGrabOffset, v.scrollGrabOffset)
+  carry(s.probeX, v.probeX)
+  carry(s.probeY, v.probeY)
+  carry(s.probeActive, v.probeActive)
+  carry(s.probeResult, v.probeResult)
+  carry(s.closeHover, v.closeHover)
+
+template intoSeat(live, seat: untyped) = seat = live
+template outOfSeat(live, seat: untyped) = live = seat
+
+proc stow(s: var SynEdit) =
+  eachSeatField(s, s.stowed[s.slot], intoSeat)
+  s.stowed[s.slot].stamp = s.cacheId
+
+proc enter*(s: var SynEdit; slot: int) =
+  ## Sit the panel `slot` down in front of this buffer: what it reads and
+  ## types from here on is its own caret and its own top line. Whoever was
+  ## here is put back in their seat first, so nothing of theirs is lost -- and
+  ## nothing of theirs shows in this panel either.
+  ##
+  ## A panel that keeps the same slot number keeps its place in every buffer
+  ## it visits, since the seats are per buffer: leave a file and come back to
+  ## it and the line you were on is still the line you are on.
+  let want = clamp(slot, 0, MaxViews - 1)
+  if want == s.slot: return
+  s.stow()
+  s.slot = want
+  eachSeatField(s, s.stowed[want], outOfSeat)
+  if s.stowed[want].stamp != s.cacheId:
+    # The text moved while this panel was away. Its caret came along with it
+    # (`noteEdit`), but which line that caret is on has to be counted again,
+    # and the top line's offset is worked out at the next render -- `editLow`
+    # was lowered for this seat as well.
+    s.setCurrentLine()
+
+proc copySeat*(s: var SynEdit; src, dest: int) =
+  ## Sit the panel `dest` down exactly where `src` is sitting. What a split
+  ## does: the panel that appears shows what the panel it came out of shows,
+  ## at the same line and with the caret in the same place, and the two of
+  ## them go their own ways from there.
+  let a = clamp(src, 0, MaxViews - 1)
+  let b = clamp(dest, 0, MaxViews - 1)
+  if a == b: return
+  if s.slot == a: s.stow()
+  s.stowed[b] = s.stowed[a]
+  if s.slot == b: eachSeatField(s, s.stowed[b], outOfSeat)
+
+proc resetSeats(s: var SynEdit) =
+  ## Every panel back to the top: whatever they were looking at is gone.
+  var fresh = default(ViewSlot)
+  eachSeatField(s, fresh, intoSeat)
+  fresh.stamp = s.cacheId
+  for j in 0 ..< MaxViews: s.stowed[j] = fresh
 
 # ---------------------------------------------------------------------------
 # Bracket matching
@@ -1403,7 +1579,13 @@ template edit(s: var SynEdit) =
 
 proc rawInsert(s: var SynEdit; c: char) =
   inc s.cacheId
-  s.noteEdit(s.cursor.int)
+  # How much longer the buffer is about to get, said before it gets longer:
+  # `noteEdit` reads the length to find out whether anything is behind the
+  # edit at all.
+  s.noteEdit(s.cursor.int, (case c
+                            of '\C': 0
+                            of '\t': s.tabSize
+                            else: 1))
   case c
   of '\L':
     s.front.add Cell(c: '\L')
@@ -1445,7 +1627,7 @@ proc rawBackspace(s: var SynEdit; overrideUtf8: bool; undoAction: var string) =
       wasNewline = true
   else:
     x = s.lastRuneLen(s.cursor - 1)
-  s.noteEdit(s.cursor.int - x)
+  s.noteEdit(s.cursor.int - x, -x)
   if undoAction.len != 0 or true:
     for i in countdown(s.front.len - 1, s.front.len - x):
       undoAction.add s.front[i].c
@@ -2273,6 +2455,7 @@ proc clear*(s: var SynEdit) =
   s.clicks = 0
   s.undoIdx = 0
   s.cursorDim = (0, 0, 0)
+  s.resetSeats()
 
 proc setText*(s: var SynEdit; text: string) =
   s.clear()
@@ -2362,7 +2545,7 @@ proc truncateOutput*(s: var SynEdit; at: int) =
   let at = clamp(at, 0, s.len)
   if at >= s.len: return
   inc s.cacheId
-  s.noteEdit(at)
+  s.noteEdit(at, at - s.len)
   s.gotoPos(s.len)
   s.prepareForEdit()          # which leaves all of it in `front`
   var removed = 0
@@ -2443,6 +2626,9 @@ proc createSynEdit*(font: Font; theme = defaultTheme()): SynEdit =
     font: font, theme: theme, flags: {},
     showLineNumbers: false, cursorVisible: true, lastBlinkTick: 0,
     blinks: true)
+  # Every seat starts where the first panel does, so a panel that has never
+  # been here yet arrives at the top of the buffer rather than in a hole.
+  result.resetSeats()
 
 # ---------------------------------------------------------------------------
 # Drawing

@@ -178,6 +178,11 @@ type
     text: string     ## output to append, may end mid-line
     finished: bool   ## the process is over; nothing more will come
 
+var owner = 0
+  ## The terminal whose program the thread below is running, by `Terminal.id`;
+  ## 0 when nothing is. There is one thread and one pair of channels, so there
+  ## is one program at a time, and a second panel that asks while it runs is
+  ## told so rather than having somebody else's output handed to it.
 var requests: Channel[ThreadTask]
 requests.open()
 var responses: Channel[ThreadReply]
@@ -381,6 +386,8 @@ type
     indexWords,         ## user typed `index <path>` or `unindex <path>`
     resetConfig,        ## user typed `defaults`
     selectTheme,        ## user typed `theme [<name>]`
+    splitPanel,         ## user typed `split right` / `split down`
+    closePanel,         ## user typed `unsplit`
     ctrlHover,          ## ctrl+mouse move over text
     ctrlClick           ## ctrl+click on text
 
@@ -411,6 +418,9 @@ type
     of resetConfig: discard
     of selectTheme:
       name*: string     ## which one; "" asks what there is to pick from
+    of splitPanel:
+      sideways*: bool   ## `right` rather than `down`
+    of closePanel: discard
     of ctrlHover, ctrlClick:
       pos*: int         ## buffer offset
 
@@ -420,6 +430,9 @@ type
 
   Terminal* = object
     ed*: SynEdit
+    id*: int            ## which terminal this is, since a window may have
+                        ## several. Only the one that started the program
+                        ## running takes its output; see `owner`.
     hist*: Table[string, CmdHistory]
     ran*: seq[string]   ## commands run since the host last emptied this.
                         ## `Enter` is handled inside `draw`, so without this a
@@ -806,6 +819,18 @@ proc runCommand*(t: var Terminal; cmd: var string): TermAction =
     i = parseWord(cmd, b, i, convToLower = true)
     t.insertPrompt()
     return TermAction(kind: selectTheme, name: b)
+  # And so are the panels: what the two buttons in a panel's corner do, for a
+  # keyboard that would rather not go and find the corner.
+  if t.isPrompt and (a == "split" or a == "unsplit"):
+    var b = ""
+    i = parseWord(cmd, b, i, convToLower = true)
+    t.insertPrompt()
+    if a == "unsplit": return TermAction(kind: closePanel)
+    if b == "right" or b == "down":
+      return TermAction(kind: splitPanel, sideways: b == "right")
+    t.ed.appendOutput "split right, or split down\L"
+    t.insertPrompt()
+    return TermAction(kind: noAction)
   case a
   of "":
     t.insertPrompt()
@@ -883,10 +908,19 @@ proc runCommand*(t: var Terminal; cmd: var string): TermAction =
         a.startsWith"https://"):
       openDefaultBrowser(a)
     else:
+      if owner != 0 and owner != t.id:
+        # One thread runs the programs, so one program runs at a time. Said
+        # here rather than queued: a command typed now and answered in five
+        # minutes, when whatever is running finishes, is not what anybody
+        # meant by pressing Enter.
+        t.ed.appendOutput "a program is already running in another terminal\L"
+        t.insertPrompt()
+        return
       t.endOutput()
       t.outputStart = t.ed.len
       requests.send(ThreadTask(cwd: t.cwd, cmd: cmd,
                                cols: t.cols, rows: t.rows))
+      owner = t.id
       t.processRunning = true
       swap(t.process, cmd)
       if t.process notin t.hist:
@@ -961,7 +995,7 @@ proc update*(t: var Terminal): bool =
   ## what it showed. Such a host also has to call this itself, and not leave
   ## it to `draw`: a frame that is never drawn is a frame that never asked.
   result = false
-  if t.processRunning:
+  if t.processRunning and owner == t.id:
     if responses.peek > 0:
       # Everything that has piled up since the last look, not one piece of it.
       # A program printing a megabyte hands it over in four-kilobyte pieces,
@@ -981,6 +1015,7 @@ proc update*(t: var Terminal): bool =
         t.showOutput(resp.text)
       if resp.finished:
         t.processRunning = false
+        owner = 0
         t.process.setLen 0
         # A program that died in the middle of a color, or halfway through
         # drawing a row, must not leave the next one carrying on from there.
@@ -998,12 +1033,23 @@ proc sendBreak*(t: var Terminal) =
   if t.processRunning:
     requests.send(ThreadTask(cwd: "", cmd: EndToken))
 
+proc busy*(t: Terminal): bool =
+  ## Is another terminal running something? Then this one cannot start
+  ## anything, and a panel it is asked to close cannot be closed either --
+  ## whoever is running it would have nowhere to say so.
+  owner != 0 and owner != t.id
+
+
 # ---------------------------------------------------------------------------
 # Initialization
 # ---------------------------------------------------------------------------
 
+var terminalsMade = 0
+
 proc createTerminal*(font: Font; theme = defaultTheme()): Terminal =
+  inc terminalsMade
   result = Terminal(
+    id: terminalsMade,
     ed: createSynEdit(font, theme),
     hist: initTable[string, CmdHistory](),
     files: @[],
