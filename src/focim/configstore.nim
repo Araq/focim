@@ -43,9 +43,11 @@ proc loadConfig*(name: string): string =
 # ---------------------------------------------------------------------------
 
 const defaultLayout* = """
-# Where the widgets go. A box states its size along the axis its parent
-# divides: (px N), (lines N), or (stretch N) shares of what is left over.
-# `doc/config.md` has the rest of it.
+# Where the widgets go, and the file the mouse writes: dragging a border
+# between two panels rewrites the sizes below. A box states its size along the
+# axis its parent divides -- (px N), (lines N), or (stretch N) shares of what
+# is left over -- and `doc/config.md` has the rest of it. A comment down in
+# the layout does not survive a drag; one up here does.
 (layout
   (cols
     (rows (px 200)
@@ -202,3 +204,27 @@ proc takeLayout*(text: string; layout: var string): string =
       dec depth
     tok = next(lex)
   result = text
+
+proc withHeader*(old, fresh: string): string =
+  ## `fresh` under whatever comment the text it replaces opened with.
+  ##
+  ## A layout the mouse rewrites cannot keep the comments *inside* it: what is
+  ## written back is the tree, and a tree has nowhere to hold a remark about
+  ## one of its boxes. The block at the top of the file is another matter --
+  ## it is a header rather than a remark, it is what the file ships with, and
+  ## keeping it costs one loop.
+  var head = ""
+  var blanks = ""
+  for line in old.splitLines:
+    let t = line.strip
+    if t.len == 0:
+      # Blank lines belong to the header only once there is one: they are the
+      # line it is separated from the layout by, and a file that opens with
+      # one has no header to separate.
+      if head.len > 0: blanks.add line & "\n"
+    elif t[0] == '#':
+      head.add blanks
+      blanks = ""
+      head.add line & "\n"
+    else: break
+  result = head & blanks & fresh

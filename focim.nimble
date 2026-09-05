@@ -12,7 +12,7 @@ bin           = @["focim"]
 requires "nim >= 2.0.0"
 # The UI library focim grew up in: windows, fonts, drawing and input, with a
 # native driver per platform.
-requires "https://github.com/nim-lang/uirelays >= 0.9.0"
+requires "https://github.com/nim-lang/uirelays >= 0.10.0"
 # One PNG in, every icon artifact a desktop application ships out. `icons`
 # below makes the build inputs with it and `bundle` hands the built editor to
 # the desktop; the nightly workflow uses it for both.

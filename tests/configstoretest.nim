@@ -190,6 +190,31 @@ block:
   check("a layout that is the whole file is left alone",
         takeLayout(Bare, lay) == Bare and lay.len == 0, lay)
 
+# ---------------------------------------------------------------------------
+echo "rewriting a layout the mouse moved:"
+# ---------------------------------------------------------------------------
+
+block:
+  # What a drag writes is the tree, so the remarks inside it are gone -- but
+  # the block at the top of the file is a header, and the shipped layout comes
+  # with one worth keeping.
+  const Fresh = "(layout (editor))\n"
+  equals("the header comes over",
+         withHeader("# mine\n# and mine\n(layout (tabs))\n", Fresh),
+         "# mine\n# and mine\n" & Fresh)
+  equals("a blank line under it counts as part of it",
+         withHeader("# mine\n\n(layout (tabs))\n", Fresh),
+         "# mine\n\n" & Fresh)
+  equals("a file that opens with the layout gets no header",
+         withHeader("(layout (tabs))\n", Fresh), Fresh)
+  equals("and neither does an empty one", withHeader("", Fresh), Fresh)
+  check("a comment further down does not come along",
+        not withHeader("(layout\n  # about this box\n  (tabs))\n",
+                       Fresh).contains("about this box"))
+  equals("the shipped layout keeps the header it ships with",
+         withHeader(defaultLayout, Fresh).splitLines[0],
+         defaultLayout.splitLines[0])
+
 removeDir sandbox
 
 echo(if failures == 0: "ALL PASS" else: $failures & " FAILURE(S)")

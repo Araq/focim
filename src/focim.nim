@@ -40,6 +40,19 @@ and change on different days: the colors are picked once, the panels are
 shoved about all the time, and a theme that arrived in the same text as the
 layout could not be replaced without replacing the layout with it.
 
+The layout is also the one of the two the mouse writes. The gaps between the
+panels are the borders, and a border is a grip: press the left button on one
+and it follows the pointer, moving the two boxes on either side of it and
+leaving everything else in that container the size it was. The release writes
+the new sizes into `[layout]` as a single edit -- so `Ctrl+Z` there undoes a
+drag, and the file is stored by the same machinery that stores a layout typed
+by hand. Each box keeps the unit it was written in: a `(px N)` follows the
+pointer to the pixel, a `(lines N)` snaps to whole lines, and the boxes that
+share what is left over have their weights rewritten from the pixels they now
+have. Which is why the layout has a file to itself: it is the settings the
+mouse edits, and it must not be replaced by anything that has an opinion about
+color.
+
 Leaving a widget out of the layout hides it without destroying it -- its
 buffer, cursor and scroll position are still there when a later layout lists
 it again. Only the `editor` cell has to stay, since it is where the layout
@@ -678,6 +691,15 @@ proc reparseConfig(src: string; theme: var Theme; track: var Track;
   track = parsed.track
   note = parsed.note
 
+proc layoutMetrics(width, height, lineHeight: int): LayoutMetrics =
+  ## The numbers a layout becomes rects by. In one place because three things
+  ## ask: the frame that draws the window, the borders a pointer takes hold of
+  ## in it, and the check that a layout has the cells this app cannot do
+  ## without. Two of them working from different numbers would be a border
+  ## that moves to somewhere other than where it was grabbed.
+  LayoutMetrics(screenW: width, screenH: height, lineHeight: lineHeight,
+                padding: scaledPx(6), gap: scaledPx(4), uiScale: gUiScale)
+
 proc reparseLayout(src: string; width, height, lineHeight: int;
                    layout: var Layout; note: var string) =
   ## And the [layout] buffer's text IS where the widgets go. Dropped on the
@@ -689,9 +711,7 @@ proc reparseLayout(src: string; width, height, lineHeight: int;
   if parsed.error.len > 0:
     note = "layout: " & parsed.error
     return
-  let cells = parsed.resolve(width, height, lineHeight,
-                             padding = scaledPx(6), gap = scaledPx(4),
-                             uiScale = gUiScale)
+  let cells = parsed.resolve(layoutMetrics(width, height, lineHeight))
   for name in RequiredCells:
     if name notin cells:
       note = "layout: no '" & name & "' cell"
@@ -1910,6 +1930,13 @@ proc main =
   # and `y` and nothing about where it happened, so this is what says which
   # panel the wheel is over.
   var pointerX, pointerY = -1
+  # The border being dragged, and the one merely under the pointer. A window
+  # is sized by pushing the borders between its panels about, and the borders
+  # are already there: the gap the layout leaves between two cells, which the
+  # background shows through. Nothing is drawn to make a handle, and no panel
+  # gives up a pixel to one.
+  var dragging = Splitter()
+  var hovering = Splitter()
 
   # The words Ctrl+Space can offer: the shipped Nimony vocabulary, whatever
   # `index` was pointed at in an earlier run, and -- from here on, a slice per
@@ -2134,9 +2161,47 @@ proc main =
     if not mustDraw and getTicks() < nextFrame: continue
     mustDraw = false
 
-    let cells = layout.resolve(width, height, fm.lineHeight,
-                               padding = scaledPx(6), gap = scaledPx(4),
-                               uiScale = gUiScale)
+    let lm = layoutMetrics(width, height, fm.lineHeight)
+    # Borders, before the layout is resolved, so that a drag is in the frame
+    # it happened in rather than in the one after it. What a drag changes is
+    # the layout itself; the text of it is written back once, on the release --
+    # a buffer edited on every mouse move would be a hundred entries in the
+    # undo stack and a reparse for each of them.
+    case e.kind
+    of MouseDownEvent:
+      if e.button == LeftButton:
+        let s = layout.splitterAt(lm, e.x, e.y)
+        if s.found:
+          dragging = s
+          e = default Event
+    of MouseMoveEvent:
+      if dragging.found:
+        discard layout.dragTo(lm, dragging, e.x, e.y)
+        e = default Event
+      else:
+        hovering = layout.splitterAt(lm, e.x, e.y)
+    of MouseUpEvent:
+      if dragging.found:
+        # The tab is the file, so this is where a drag ends up: one edit, which
+        # Ctrl+Z in [layout] takes back, and which the lane machinery at the
+        # top of the loop parses and stores like any other.
+        let tree = $layout
+        for b in buffers.mitems:
+          if b.kind == bufLayout and tree.len > 0:
+            let text = withHeader(b.ed.fullText, tree)
+            if b.ed.fullText == text: continue
+            if b.ed.len > 0: b.ed.replaceRange(0, b.ed.len - 1, text)
+            else: b.ed.insertText(text)
+        dragging = Splitter()
+        e = default Event
+    of WindowFocusLostEvent:
+      # A button released over another window is a release this one never
+      # hears about, and a border that went on following the pointer after
+      # that would be a window that resizes itself while nobody is looking.
+      dragging = Splitter()
+    else: discard
+
+    let cells = layout.resolve(lm)
 
     # Only ever one question is outstanding, and anything the user starts
     # instead of answering it withdraws it -- otherwise the next line typed
@@ -2155,6 +2220,15 @@ proc main =
     # comes from the theme: `actionColor` is what the theme already uses to
     # frame things.
     fillRect(rect(0, 0, width, height), theme.actionColor)
+
+    # The border under the pointer, in the colors the theme already keeps for
+    # a thing that is dragged: this is a scrollbar grip by another name, and a
+    # window whose panels can be pushed about has to say so before they are.
+    let grip = if dragging.found: dragging else: hovering
+    if grip.found:
+      fillRect(layout.splitterRect(lm, grip),
+               if dragging.found: theme.scrollBarActiveColor
+               else: theme.scrollBarColor)
 
     case e.kind
     of QuitEvent, WindowCloseEvent:

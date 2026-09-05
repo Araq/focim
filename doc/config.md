@@ -100,6 +100,36 @@ seam: three `(stretch 1)` boxes in 100 pixels are 33, 33 and 34.
 them, which is how focim draws its borders. Gaps come off the
 stretching boxes, never off a `px` or `lines` one.
 
+## Dragging the borders
+
+The gaps between the panels are the borders, and the borders are grips: press
+the left button on one and it follows the pointer until the button comes back
+up. Nothing is drawn to mark them out until the pointer is on one, and then
+the gap itself lights up in the color the theme gives a scrollbar grip.
+
+What a drag moves is the two boxes on either side of the border. Everything
+else in that container stays the size it is, so pushing one panel about does
+not shuffle the rest of the window.
+
+Each box is written back in the unit it was already written in, which is what
+keeps the file readable after a drag:
+
+| Written as | What a drag does to it |
+|------------|------------------------|
+| `(px N)` | follows the pointer to the pixel |
+| `(lines N)` | snaps to whole lines, and the neighbour takes the remainder |
+| `(stretch N)` | the weights of every stretching box in that container are rewritten from the pixels they now have |
+
+A box cannot be dragged below twelve pixels: at nothing at all there would be
+nothing left to catch hold of, and a panel that could only be brought back by
+typing is not what a border is for.
+
+The release writes the layout into the `[layout]` tab as one edit, so `Ctrl+Z`
+there undoes the whole drag, and the tab is saved to `layout.nif` the way any
+other edit of it is. What is written is the tree: a comment *inside* the
+layout does not survive a drag, though the block of comment at the top of the
+file does.
+
 # The theme
 
 `config.nif`, and the `[config]` tab, along with `(track ...)` below.
