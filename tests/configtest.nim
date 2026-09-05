@@ -307,5 +307,79 @@ block:
   check("a broken config has no layout", bad.layout.resolve(100, 100).len == 0)
   equals("and the fallback theme", $bad.theme.bg, $defaultTheme().bg)
 
+# ---------------------------------------------------------------------------
+echo "themes:"
+# ---------------------------------------------------------------------------
+
+proc sameTheme(a, b: Theme): string =
+  ## "" when the two themes are the same one, otherwise the first field that
+  ## says they are not. Written out field by field on purpose: a `==` would
+  ## stop saying anything the day `Theme` grows a field, and this is the test
+  ## that a written theme carries *everything*.
+  for tc in low(TokenClass)..high(TokenClass):
+    if a.fg[tc] != b.fg[tc]:
+      return $tc & " is " & $a.fg[tc] & " not " & $b.fg[tc]
+    if a.style[tc] != b.style[tc]:
+      return $tc & " is styled " & $a.style[tc] & " not " & $b.style[tc]
+  let fields = [("bg", a.bg, b.bg), ("panelBg", a.panelBg, b.panelBg),
+                ("selBg", a.selBg, b.selBg),
+                ("bracketBg", a.bracketBg, b.bracketBg),
+                ("cursorColor", a.cursorColor, b.cursorColor),
+                ("lineNumColor", a.lineNumColor, b.lineNumColor),
+                ("markerBg", a.markerBg, b.markerBg),
+                ("scrollBarColor", a.scrollBarColor, b.scrollBarColor),
+                ("scrollBarActiveColor", a.scrollBarActiveColor,
+                 b.scrollBarActiveColor),
+                ("scrollTrackColor", a.scrollTrackColor, b.scrollTrackColor),
+                ("activeLineBg", a.activeLineBg, b.activeLineBg),
+                ("actionColor", a.actionColor, b.actionColor),
+                ("closeColor", a.closeColor, b.closeColor),
+                ("focusColor", a.focusColor, b.focusColor)]
+  for f in fields:
+    if f[1] != f[2]: return f[0] & " is " & $f[1] & " not " & $f[2]
+  result = ""
+
+for it in ShippedThemes:
+  var t = default(Theme)
+  check(it.name & " is a theme this build has", findTheme(it.name, t))
+  # Every shipped theme is one its own contrast check would let a user keep.
+  equals(it.name & " can be read", contrastProblem(t), "")
+  # And what it looks like as text is what it is: write it, parse it back, and
+  # nothing has moved. The fallback is deliberately *another* shipped theme --
+  # a field the writer forgot would come back as that one's color instead of
+  # as a default that happens to match.
+  let other = if it.name == "mocha": goldenDusk() else: catppuccinMocha()
+  let c = parseConfig("(config\n" & themeText(t) & ")\n", fallback = other)
+  check(it.name & " is a config file", c.error.len == 0, c.error)
+  equals(it.name & " is accepted as it is written", c.note, "")
+  equals(it.name & " round trips through the config syntax",
+         sameTheme(c.theme, t), "")
+
+block:
+  # A theme is written out whole, so it cannot be read as a coat of paint over
+  # the theme it replaces: nothing of the fallback survives it.
+  var paper = default(Theme)
+  doAssert findTheme("paper", paper)
+  let c = parseConfig("(config\n" & themeText(paper) & ")",
+                      fallback = goldenDusk())
+  equals("a written theme replaces the fallback entirely",
+         sameTheme(c.theme, paper), "")
+  check("down to the colors only a terminal asks for",
+        c.theme.fg[TokenClass.BrightCyan] != goldenDusk().fg[TokenClass.BrightCyan])
+
+block:
+  var t = catppuccinMocha()
+  check("a name nobody ships is refused", not findTheme("solarized", t))
+  equals("and the theme is left alone", sameTheme(t, catppuccinMocha()), "")
+  equals("the names are there to be listed", themeNames(), "dusk, mocha, paper")
+
+block:
+  # The indentation is the caller's: a theme written into a config file sits
+  # two spaces in, and one written on its own sits at the margin.
+  let t = goldenDusk()
+  check("indent 0 starts at the margin", themeText(t, 0).startsWith("(theme"))
+  check("indent 2 is the config file's", themeText(t, 2).startsWith("  (theme"))
+  check("and neither ends in a newline", not themeText(t).endsWith("\n"))
+
 echo(if failures == 0: "ALL PASS" else: $failures & " FAILURE(S)")
 if failures > 0: quit 1

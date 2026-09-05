@@ -380,6 +380,7 @@ type
     answer,             ## a line typed while `question` was up
     indexWords,         ## user typed `index <path>` or `unindex <path>`
     resetConfig,        ## user typed `defaults`
+    selectTheme,        ## user typed `theme [<name>]`
     ctrlHover,          ## ctrl+mouse move over text
     ctrlClick           ## ctrl+click on text
 
@@ -408,6 +409,8 @@ type
                         ## indexing anything
       forget*: bool     ## `unindex`: drop the set instead of adding it
     of resetConfig: discard
+    of selectTheme:
+      name*: string     ## which one; "" asks what there is to pick from
     of ctrlHover, ctrlClick:
       pos*: int         ## buffer offset
 
@@ -796,6 +799,13 @@ proc runCommand*(t: var Terminal; cmd: var string): TermAction =
   if t.isPrompt and a == "defaults":
     t.insertPrompt()
     return TermAction(kind: resetConfig)
+  # And so is `theme`: it swaps the same config for another one the app ships.
+  # A terminal keeps the word for whatever program goes by it.
+  if t.isPrompt and a == "theme":
+    var b = ""
+    i = parseWord(cmd, b, i, convToLower = true)
+    t.insertPrompt()
+    return TermAction(kind: selectTheme, name: b)
   case a
   of "":
     t.insertPrompt()

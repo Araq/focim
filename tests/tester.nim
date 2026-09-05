@@ -12,6 +12,9 @@ proc exec(cmd: string) =
 
 # The config parser and the markdown one need no font, so they go first.
 exec "nim c -r tests/configtest.nim"
+# And the directory that config is kept in, which needs no font either -- it
+# points the config dir at a temporary one, so it touches nothing of yours.
+exec "nim c -r tests/configstoretest.nim"
 exec "nim c -r tests/markdowntest.nim"
 # Bold and italics reach the drawing path through stub relays.
 exec "nim c -r tests/styletest.nim"

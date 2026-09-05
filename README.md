@@ -11,7 +11,10 @@ from -- the `(layout ...)` that places the widgets and the `(theme ...)` that
 colors them. Editing it relayouts and recolors the window on the next frame,
 so there is no settings dialog. A config that does not parse is reported in
 the status bar with the line and column of the mistake and then ignored, so
-the last good one keeps the window usable.
+the last good one keeps the window usable. Three configs ship with it --
+`theme` in the prompt lists them, `theme paper` puts one in the tab -- and a
+config that had been edited is written to a backup file first, since a theme
+here is a whole config and not a coat of paint.
 
 The same idea runs through the rest of it. There is no tab bar and no tree
 view: the list of open tabs is an edit field whose lines are the tabs, so

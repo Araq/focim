@@ -76,6 +76,15 @@ edit like any other, so `Ctrl+Z` in that tab brings the old config back. Only
 the prompt understands the word; in the terminal it names a program, which is
 what the terminal is for.
 
+`theme` is the same door with more than one thing behind it: three configs
+ship with the editor, `theme` lists them and `theme paper` puts one in the
+tab. A theme is a whole config rather than a palette spliced into the one
+that is there -- it is written out of a `Theme` object, every field and every
+token class, so nothing of the theme it replaces is left standing. What it
+replaces is not lost either: `Ctrl+Z` has it for the session, and a config
+that had been edited by hand goes to `config-backup.nif` beside `config.nif`
+before the edit is made. See `doc/config.md`.
+
 `find`, `findall`, `next`, `prev`, `replace` and `replaceall` are the same idea
 applied to searching: no dialog, one line of text, and every match highlighted
 in place -- in the other open tabs as well. Ctrl+F, F3 and Shift+F3 are there
@@ -164,6 +173,7 @@ import uirelays/layout
 import focim/[synedit, terminal, config, wordindex, cliphistory, search,
               filesearch]
 import focim/track
+import focim/configstore
 import focim/completion
 
 # Derived from focim-icon.png by `iconbundler --prepare focim`.
@@ -185,72 +195,6 @@ else:
     ## Windows takes its icon from the linked `.res` and macOS from the bundle,
     ## so there is nothing for the window itself to carry.
 
-const defaultConfig = """
-(config
-  (layout
-    (cols
-      (rows (px 200)
-        (tabs (lines 6))
-        (explorer))
-      (editor (stretch 4))
-      (rows (stretch 2)
-        (clipboard (lines 9))
-        (history (lines 5))
-        (terminal)))
-    (status (lines 1)))
-  # Anything left out keeps the color it has; `doc/config.md` lists
-  # the fields.
-  # Every token class is written out below, so any of them can be recolored by
-  # editing the line rather than by first finding out that the class exists.
-  # A color may be followed by (bold), by (italics), or by both.
-  (theme
-    (bg "#15171B")
-    (fg "#E6DFD1"                     # the base color, for anything unnamed
-      (None "#E6DFD1")
-      (Whitespace "#E6DFD1")
-      (DecNumber "#E8833A")
-      (BinNumber "#E8833A")
-      (HexNumber "#E8833A")
-      (OctNumber "#E8833A")
-      (FloatNumber "#E8833A")
-      (Identifier "#E6DFD1")
-      (Keyword "#E5B94E" (bold))
-      (StringLit "#2EC4B6")
-      (LongStringLit "#2EC4B6")
-      (CharLit "#2EC4B6")
-      (Backticks "#2EC4B6")
-      (EscapeSequence "#F2A65A")
-      (Operator "#C9A227")
-      (Punctuation "#8C8578")
-      (Comment "#7A7365" (italics))
-      (LongComment "#7A7365" (italics))
-      (RegularExpression "#E8833A")
-      (TagStart "#E5B94E")            # markup
-      (TagStandalone "#E5B94E")
-      (TagEnd "#E5B94E")
-      (Key "#2EC4B6")                 # ini, nif, config files
-      (Value "#E8833A")
-      (RawData "#2EC4B6")
-      (Assembler "#E5B94E")
-      (Preprocessor "#1FA398")
-      (Directive "#1FA398")
-      (Command "#E5B94E")
-      (Rule "#1FA398")
-      (Link "#4FD1C5")
-      (Label "#E8833A")
-      (Reference "#E8833A")
-      (Text "#E6DFD1")
-      (Other "#E6DFD1")
-      (Green "#4FBF9F")               # the three the terminal colors by name
-      (Yellow "#E5B94E")
-      (Red "#E4634A")
-      (MarkdownFence "#7A7365")))
-  # Who answers a Ctrl+click on a name: "nim", "nimony", or "none" for nobody.
-  # (exe "...") names the binary when it is not simply on the PATH.
-  (track
-    (compiler "nim")))
-"""
-
 const
   PathChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '.', '/', '\\',
                '-', '~', '\128'..'\255'}
@@ -265,7 +209,6 @@ const
   ## keeps its state until a later layout brings it back. Only the editor
   ## has to stay: without it there is nowhere to type the layout back.
   RequiredCells = ["editor"]
-  ConfigDirName = "focim"
   WordsDirName = "words"
     ## Under the config dir: one file per indexed path, so that `index` is
     ## paid for once and not on every start.
@@ -322,22 +265,21 @@ const
     ## already reads as a program printing, and a repaint per peek would read
     ## exactly the same at twenty times the price.
 
-proc configPath(name: string): string =
-  getConfigDir() / ConfigDirName / name
-
-proc saveConfig(name, text: string) =
-  ## Best effort: an unwritable config dir must not take the editor down.
-  try:
-    createDir(configPath(name).parentDir)
-    writeFile(configPath(name), text)
-  except CatchableError:
-    discard
-
-proc loadConfig(name: string): string =
-  try:
-    result = readFile(configPath(name))
-  except CatchableError:
-    result = ""
+static:
+  # The theme a widget falls back to and the theme a fresh config file names
+  # are the same theme. Nothing enforces that but this line.
+  doAssert defaultConfig == shippedConfig(defaultTheme()),
+           "ShippedThemes[0] is not defaultTheme()"
+  # And every one of them is a config this app can actually run on. A theme is
+  # offered in a prompt, where the answer to picking a broken one would be a
+  # parse error in the status bar; checked here, that answer cannot ship.
+  for i in 0 ..< ShippedConfigs.len:
+    let c = parseConfig(ShippedConfigs[i])
+    doAssert c.error.len == 0, ShippedThemes[i].name & ": " & c.error
+    doAssert c.note.len == 0, ShippedThemes[i].name & ": " & c.note
+    for name in RequiredCells:
+      doAssert name in c.layout.resolve(1024, 768, lineHeight = 16),
+               ShippedThemes[i].name & ": no '" & name & "' cell"
 
 var gUiScale = 100
   ## Percent to enlarge text by on this display, from `ScreenLayout.uiScale`.
@@ -1518,25 +1460,82 @@ proc runAnswer(word: string; asked: var Ask; f: var Finder;
     note = "replaced " & $f.replaced
     asked = Ask()
 
-proc runDefaults(buffers: var seq[BufferEntry]; note: var string) =
-  ## `defaults`: put the config the app ships with back into the [config] tab.
-  ## Written as an edit rather than as a new text, so Ctrl+Z in that tab brings
-  ## a hand-written config back -- which is why this asks nothing first: what
-  ## it replaces is one keystroke away for as long as the tab is open. The
-  ## main loop does the rest, since it already reparses and stores that buffer
-  ## whenever it changed.
+type
+  ConfigPut = enum
+    ## What putting a config into the [config] tab came to.
+    putNoTab     ## there is no such tab, so there was nowhere to put it
+    putSame      ## the tab already says exactly this
+    putDone      ## replaced
+
+proc putConfig(buffers: var seq[BufferEntry]; text: string;
+               saved: var string): ConfigPut =
+  ## Put `text` into the [config] tab as an *edit*, so that Ctrl+Z in that tab
+  ## brings back what was there -- which is why nothing is asked first: what
+  ## this replaces is one keystroke away for as long as the tab is open. A
+  ## config that was written by hand goes to a file as well, since a keystroke
+  ## only lasts as long as the session does; `saved` says where, or is "" when
+  ## there was nothing to save (this is one of the shipped configs) or nowhere
+  ## to save it. The main loop does the rest: it already reparses and stores
+  ## that buffer whenever it changed.
+  saved = ""
   for b in buffers.mitems:
     if b.isConfig:
-      if b.ed.fullText == defaultConfig:
-        note = "the config already is the default one"
-      elif b.ed.len > 0:
-        b.ed.replaceRange(0, b.ed.len - 1, defaultConfig)
-        note = "config back to the defaults; Ctrl+Z in [config] undoes it"
-      else:
-        b.ed.insertText(defaultConfig)
-        note = "config back to the defaults"
+      let old = b.ed.fullText
+      if old == text: return putSame
+      if shippedName(old).len == 0 and old.strip.len > 0:
+        saved = backupConfig(old)
+      if b.ed.len > 0: b.ed.replaceRange(0, b.ed.len - 1, text)
+      else: b.ed.insertText(text)
+      return putDone
+  result = putNoTab
+
+proc putNote(outcome: ConfigPut; saved, what: string; note: var string) =
+  ## The one line all of this has to be said in.
+  case outcome
+  of putNoTab: note = "there is no [config] tab to put it in"
+  of putSame: note = "the config already is " & what
+  of putDone:
+    note = "config: " & what
+    if saved.len > 0: note.add "; the edited one is in " & saved
+    else: note.add "; Ctrl+Z in [config] undoes it"
+
+proc runDefaults(buffers: var seq[BufferEntry]; note: var string) =
+  ## `defaults`: put the config the app ships with back into the [config] tab.
+  var saved = ""
+  putNote(putConfig(buffers, defaultConfig, saved), saved,
+          "the defaults (" & ShippedThemes[0].name & ")", note)
+
+proc themeList(buffers: seq[BufferEntry]): string =
+  ## What `theme` on its own answers: the names, what each one looks like, and
+  ## which of them is up.
+  result = "themes: "
+  for i in 0 ..< ShippedThemes.len:
+    if i > 0: result.add ", "
+    result.add ShippedThemes[i].name & " (" & ShippedThemes[i].blurb & ")"
+  var now = ""
+  for b in buffers:
+    if b.isConfig:
+      now = shippedName(b.ed.fullText)
+      break
+  result.add "; now: " & (if now.len > 0: now else: "a config of your own")
+
+proc runTheme(name: string; buffers: var seq[BufferEntry]; note: var string) =
+  ## `theme` lists what there is, `theme <name>` puts one of them in the
+  ## [config] tab. A theme is a whole config and not a palette spliced into
+  ## the one that is there: the layout that comes with it is the shipped one,
+  ## and a config that had been edited is saved off to a file first -- see
+  ## `putConfig`.
+  if name.len == 0:
+    note = themeList(buffers)
+    return
+  for i in 0 ..< ShippedThemes.len:
+    if ShippedThemes[i].name == name:
+      # The very text `shippedName` recognizes, so that a tab holding a theme
+      # is a tab nothing has to be backed up out of when the next one lands.
+      var saved = ""
+      putNote(putConfig(buffers, ShippedConfigs[i], saved), saved, name, note)
       return
-  note = "there is no [config] tab to put it in"
+  note = "'" & name & "' is not one of the themes: " & themeNames()
 
 proc runSave(act: TermAction; asked: var Ask; buffers: var seq[BufferEntry];
              current: int; note: var string) =
@@ -2355,9 +2354,9 @@ proc main =
       discard
     of indexWords:
       runIndexCommand(termAct, words, job, tabs.note)
-    of resetConfig:
-      # Unreachable: `defaults` is the prompt's command, and this is the
-      # terminal -- there the word is a program's name.
+    of resetConfig, selectTheme:
+      # Unreachable: `defaults` and `theme` are the prompt's commands, and this
+      # is the terminal -- there the words are programs' names.
       discard
     of ctrlHover:
       let (_, _, _, a, b) = term.ed.extractFilePosition(termAct.pos)
@@ -2415,6 +2414,9 @@ proc main =
       runIndexCommand(statusAct, words, job, tabs.note)
     of resetConfig:
       runDefaults(buffers, tabs.note)
+      redrawStatus()
+    of selectTheme:
+      runTheme(statusAct.name, buffers, tabs.note)
       redrawStatus()
     of ctrlHover, ctrlClick, noAction: discard
 

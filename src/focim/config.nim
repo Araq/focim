@@ -32,6 +32,7 @@
 ## `note` says so while `theme` falls back. That way a config typed by hand can
 ## always be corrected -- it cannot lock the window it configures.
 
+import std/strutils
 import uirelays/[screen, layout, tinynif]
 import theme
 
@@ -250,6 +251,96 @@ proc parseTheme(p: var Parser; t: var Theme) =
     p.fail "expected ')' or a theme field but found " & $p.tok
     return
   p.advance
+
+# ---------------------------------------------------------------------------
+# Writing one back. A config file is a thing to edit, so the editor has to be
+# able to hand one over -- `themeText` is what a shipped theme looks like as
+# text, and what it says is read back by `parseTheme` above. The two are kept
+# honest by a round trip in the test suite: write a theme, parse it, and get
+# the same theme.
+# ---------------------------------------------------------------------------
+
+const CommentCol = 38
+  ## Where a trailing comment starts, for the lines short enough to reach it.
+  ## A line longer than this keeps its comment one space behind it rather than
+  ## pushing every other comment to the right.
+
+proc colorText*(c: Color): string =
+  ## `"#RRGGBB"`, or `"#RRGGBBAA"` when the color is not opaque -- always one
+  ## of the spellings `toColor` reads back.
+  const Hex = "0123456789ABCDEF"
+  result = "\"#"
+  for v in [c.r, c.g, c.b]:
+    result.add Hex[int(v) shr 4]
+    result.add Hex[int(v) and 15]
+  if c.a != 255:
+    result.add Hex[int(c.a) shr 4]
+    result.add Hex[int(c.a) and 15]
+  result.add '"'
+
+proc classNote(tc: TokenClass): string =
+  ## The few remarks worth carrying into a written config: where one group of
+  ## token classes ends and the next begins. The rest of them are their own
+  ## explanation.
+  case tc
+  of TokenClass.TagStart: "markup"
+  of TokenClass.Key: "ini, nif, config files"
+  of TokenClass.Green: "the three the terminal colors by name"
+  of TokenClass.Black: "the sixteen a program can ask for by name"
+  else: ""
+
+proc themeText*(t: Theme; indent = 2): string =
+  ## `t` as the `(theme ...)` block of a config file, indented by `indent`
+  ## spaces and ending without a newline.
+  ##
+  ## Every field and every token class is written out -- nothing is left to
+  ## the fallback theme. A written theme therefore replaces the one it is
+  ## written over completely, which is the point: a file that named only the
+  ## colors it happened to differ in would leave the rest of an earlier theme
+  ## standing, and the two together are a theme nobody chose.
+  let i0 = spaces(indent)
+  let i1 = spaces(indent + 2)
+  let i2 = spaces(indent + 4)
+  template say(text, note: string) =
+    var ln = text
+    if note.len > 0:
+      if ln.len < CommentCol: ln.add spaces(CommentCol - ln.len)
+      else: ln.add ' '
+      ln.add "# " & note
+    result.add ln
+    result.add '\n'
+
+  result = i0 & "(theme\n"
+  say i1 & "(bg " & colorText(t.bg) & ")", "the editor background"
+  say i1 & "(panelBg " & colorText(t.panelBg) & ")", "the panels around it"
+  say i1 & "(selBg " & colorText(t.selBg) & ")", "selected text"
+  say i1 & "(bracketBg " & colorText(t.bracketBg) & ")", "the matching bracket"
+  say i1 & "(cursorColor " & colorText(t.cursorColor) & ")", "the caret"
+  say i1 & "(lineNumColor " & colorText(t.lineNumColor) & ")", "line numbers"
+  say i1 & "(markerBg " & colorText(t.markerBg) & ")", "search hits"
+  say i1 & "(scrollBarColor " & colorText(t.scrollBarColor) & ")", "the grip"
+  say i1 & "(scrollBarActiveColor " & colorText(t.scrollBarActiveColor) & ")",
+      "the grip while dragged"
+  say i1 & "(scrollTrackColor " & colorText(t.scrollTrackColor) & ")",
+      "the track behind it"
+  say i1 & "(activeLineBg " & colorText(t.activeLineBg) & ")",
+      "the line the caret is on"
+  say i1 & "(actionColor " & colorText(t.actionColor) & ")",
+      "a row that acts on click"
+  say i1 & "(closeColor " & colorText(t.closeColor) & ")", "the (x) on it"
+  say i1 & "(focusColor " & colorText(t.focusColor) & ")",
+      "the frame around the focused panel"
+  # `fg` last: it is the long one, and its ')' is the one that ends the theme.
+  say i1 & "(fg " & colorText(t.fg[TokenClass.None]),
+      "the base color, for anything unnamed"
+  for tc in low(TokenClass)..high(TokenClass):
+    var ln = i2 & "(" & $tc & " " & colorText(t.fg[tc])
+    if FontStyle.bold in t.style[tc]: ln.add " (bold)"
+    if FontStyle.italics in t.style[tc]: ln.add " (italics)"
+    ln.add ")"
+    if tc == high(TokenClass): ln.add "))"
+    say ln, classNote(tc)
+  result.setLen result.len - 1   # the block ends where its ')' does
 
 proc parseString(p: var Parser; dest: var string) =
   ## A tag whose whole content is one string: `(exe "nim")`.

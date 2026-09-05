@@ -129,10 +129,52 @@ down from. `(fg "#E6DFD1" (Keyword "#E5B94E"))` is an off-white editor with
 gold keywords and nothing else -- `Green`, `Yellow` and `Red` included, which
 is what the terminal colors its output by.
 
-Typing `defaults` in the prompt puts the shipped config back into the
-`[config]` tab, for one that has been edited into a corner. It is an ordinary
-edit, so `Ctrl+Z` in that tab takes it back. The terminal does not know the
-word: there it is a program's name.
+## The shipped themes
+
+Three configs come with the editor, and the prompt hands them out:
+
+| Typed in the prompt | What happens |
+|---------------------|--------------|
+| `theme` | lists the themes and says which one is up |
+| `theme dusk` | dark, gold and turquoise -- the one a fresh config names |
+| `theme mocha` | dark, Catppuccin Mocha |
+| `theme paper` | light, ink on paper |
+| `defaults` | the same as `theme dusk` |
+
+A theme here is a whole config and not a palette painted over the one that is
+there: what lands in the `[config]` tab is the shipped layout, the shipped
+tracking default, and that theme written out in full -- every field and every
+token class, so that no color of the previous theme is left standing in a
+corner of the window.
+
+Which means switching themes replaces a config that was edited. Two things
+keep that from costing anything. It is an ordinary edit, so `Ctrl+Z` in the
+`[config]` tab brings the old text straight back; and before the edit is made,
+a config that is not one of the three verbatim is written to
+`config-backup.nif` next to `config.nif`, so it outlives the session as well.
+That file is never overwritten -- the next backup is `config-backup2.nif`,
+then `config-backup3.nif` -- because the second theme switch of an afternoon
+must not be what loses the config the first one was protecting. Open one with
+`o ~/.config/focim/config-backup.nif` (or wherever `getConfigDir()` points on
+your platform) to take pieces of it back.
+
+The terminal knows none of these words: there `theme` and `defaults` are
+programs' names, and macOS ships one of exactly the latter name.
+
+## Writing a theme of your own
+
+The shipped configs are written *out of* a `Theme` object by the same code
+that writes any theme, so what they look like is what the format can say --
+there is no field a theme has that the file cannot name. Start from the one
+closest to what you want, change the colors that bother you, and stop; nothing
+has to be complete, since what a config leaves unsaid keeps the color it has.
+
+A theme whose text could not be read on its own background is refused: the
+status bar says which color it was and by how much, and the window keeps the
+theme it had, since the file that would have to be corrected is displayed in
+those very colors. The bar is 3.0:1 for every token class, the caret, the line
+numbers and the `(x)`, measured against the background each of them is drawn
+on.
 
 ## Bold and italics
 
