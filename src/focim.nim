@@ -2426,16 +2426,24 @@ proc main =
     # frame lands in the gap the layout leaves between the cells -- half of it
     # per side, so two neighbours cannot both claim the same pixel -- and
     # therefore takes no room from the widget and cannot move its text.
-    if focus in cells:
-      # Clamped to the window: a cell against an edge has no gap on that side,
-      # and a frame drawn past it would simply not be there.
-      let f = cells[focus]
-      let fw = scaledPx(2)
-      let x0 = max(0, f.x - fw)
-      let y0 = max(0, f.y - fw)
-      let x1 = min(width - 1, f.x + f.w - 1 + fw)
-      let y1 = min(height - 1, f.y + f.h - 1 + fw)
-      drawFrame(rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1), theme.focusColor, fw)
+    template frameCell(name: string) =
+      if name in cells:
+        # Clamped to the window: a cell against an edge has no gap on that
+        # side, and a frame drawn past it would simply not be there.
+        let f = cells[name]
+        let fw = scaledPx(2)
+        let x0 = max(0, f.x - fw)
+        let y0 = max(0, f.y - fw)
+        let x1 = min(width - 1, f.x + f.w - 1 + fw)
+        let y1 = min(height - 1, f.y + f.h - 1 + fw)
+        drawFrame(rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1), theme.focusColor, fw)
+
+    frameCell focus
+    # The tab list is framed along with the editor, not instead of it: it is
+    # less a panel of its own than the editor's label, and the row it marks is
+    # the buffer the keystrokes are landing in. Lighting up both says where
+    # the text goes and which of the open files it goes into, in one glance.
+    if focus == "editor": frameCell "tabs"
 
     # Persist the session once everything that could have changed it has run.
     let tt = tabsText(buffers)
