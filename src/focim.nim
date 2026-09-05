@@ -133,20 +133,22 @@ other, numbered, and Ctrl+1 .. Ctrl+9 paste one at the caret. See
 `doc/clipboard.md`.
 
 Icon: `focim-icon.png` is the source art, and the files built from it that are
-checked in next to it -- `focim-icon.netwm` for X11, `focim.ico` / `.rc` /
-`.res` for Windows. Deriving those from the PNG, and installing the desktop
-entry or the `.app` bundle, is somebody else's job: `iconbundler`
+checked in next to it -- `focim-icon.netwm`, which the X11 branch below
+`staticRead`s, and `focim.ico` / `.rc` / `.res`, which the Windows branch
+links. Deriving those from the PNG, and installing the desktop entry or the
+`.app` bundle, is somebody else's job: `iconbundler`
 (https://github.com/Araq/iconbundler), which is a tool for any desktop
-application and does not belong in an editor. After changing the PNG, from
-`src/`:
+application and does not belong in an editor. It is a dependency, so:
 
-    iconbundler --prepare focim
+    nimble icons      # after changing the PNG: remakes the four files above
+    nimble bundle     # builds, and gives this build to the desktop
 
-and to install this build for the desktop as well:
-
-    iconbundler focim ../focim focim-icon.png \
-      --generic-name "Text Editor" --comment "Focussed Nim Editor" \
-      --categories "Development;TextEditor;"
+They are checked in rather than made by every build on purpose. Three of them
+are inputs to the compiler, so a machine with no ImageMagick has to be able to
+build all the same -- and two image tools do not resample a PNG to the same
+bytes, so a build that remade them would rewrite files nobody edited. A
+checkout that is missing one gets it made: that is the `before build` hook in
+`focim.nimble`.
 
 `StartupWMClass` / the bundle id stem must match the name of the executable,
 which is what lands in `WM_CLASS` -- so the binary has to stay called `focim`.
