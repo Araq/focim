@@ -9,6 +9,7 @@ nimcache/
 nimblecache/
 htmldocs/
 testArtifacts/
+staging/
 /focim
 /deps
 /nim.cfg

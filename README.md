@@ -29,6 +29,14 @@ Nightly binaries for Linux (x86_64 and ARM64), macOS (ARM64) and Windows
 [`nightly.yml`](.github/workflows/nightly.yml), one release per commit.
 Extract and run `focim`, optionally with a file to open.
 
+Every archive carries the editor's icon in the form its desktop wants: the
+Windows `.exe` has it as a resource, the macOS archive holds `focim.app`
+alongside the bare binary, and the Linux one has the hicolor PNGs and a
+`.desktop` entry that `./install.sh` puts in the menu, pointing at wherever
+the archive was extracted. All three are made by
+[iconbundler](https://github.com/Araq/iconbundler) out of the one
+`src/focim-icon.png`.
+
 On Linux the binary links only libc: X11 is loaded at runtime, so
 `libX11.so.6` and `libXft.so.2` have to be installed (`apt install libx11-6
 libxft2`) along with at least one font fontconfig can find. macOS and Windows
@@ -39,18 +47,28 @@ need nothing.
 focim is written with [uirelays](https://github.com/nim-lang/uirelays), which
 gives it a window, a font and a mouse through the native API of each platform
 -- WinAPI, Cocoa or X11, none of which needs a development package installed
-to compile against. It is not on the Nimble package list yet, hence the URL:
+to compile against. Neither it nor
+[iconbundler](https://github.com/Araq/iconbundler), which makes the icons, is
+on the Nimble package list yet, hence the URLs in `focim.nimble`:
 
 ```sh
-nimble install https://github.com/nim-lang/uirelays
 nimble build            # or: nim c -d:release --outdir:. src/focim.nim
 ./focim
+
+nimble bundle           # ... and put this build in the desktop's menu
+nimble icons            # remake src/focim.{ico,rc,res} and the .netwm blob
+                        # from src/focim-icon.png, after editing the art
 ```
 
-`Ctrl+Space` completes out of a vocabulary that ships in `data/nimony.txt`,
-which the editor looks for in `data/` next to its binary and one directory
-above it -- so a `nimble build` in a checkout finds it as it stands. Without
-it the editor starts out knowing the words in the open buffers alone.
+`nimble icons` is the only step that needs ImageMagick (or a Python with
+Pillow), and it is not part of a build: what it writes is checked in, since a
+compiler reads three of those four files and two image tools do not resample a
+PNG to the same bytes.
+
+`Ctrl+Space` completes out of a vocabulary the binary carries: the words in
+`data/nimony.txt` are compiled in, the way the icon is, so it is there however
+the editor was installed. `tools/mkwordlist.nim` is what writes that file, out
+of a checkout of the library it is a vocabulary of.
 
 ## What it does
 

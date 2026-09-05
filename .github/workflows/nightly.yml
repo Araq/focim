@@ -144,12 +144,13 @@ jobs:
       # No -dev packages: the X11 driver reaches libX11 and libXft through
       # `dynlib`, so nothing X11 is needed to compile and the binary links
       # only libc. What is installed here is what the smoke test needs to
-      # actually open a window -- the runtime libraries, a display and a font.
-      - name: Install what the Linux smoke test needs
+      # actually open a window -- the runtime libraries, a display and a font
+      # -- plus the one thing iconbundler cannot do itself: resample a PNG.
+      - name: Install what the Linux smoke test and the icons need
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb libx11-6 libxft2 fonts-dejavu-core x11-utils
+          sudo apt-get install -y xvfb libx11-6 libxft2 fonts-dejavu-core x11-utils imagemagick
 
       - name: Setup Nim
         uses: alaviss/setup-nim@0.1.1
@@ -161,12 +162,17 @@ jobs:
       - name: Nim version
         run: nim --version
 
-      - name: Install uirelays
-        # The UI library focim is written with. Not on the Nimble package
-        # list, so it is installed by URL -- the same dependency
-        # `focim.nimble` declares.
+      - name: Install the dependencies
+        # What `focim.nimble` requires, by URL for the same reason it does:
+        # neither is on the Nimble package list. uirelays is the UI library
+        # focim is written with; iconbundler is the build tool that turns
+        # `src/focim-icon.png` into what each desktop wants to see, and it
+        # lands in ~/.nimble/bin.
         shell: bash
-        run: nimble install -y https://github.com/nim-lang/uirelays
+        run: |
+          set -euo pipefail
+          nimble install -y https://github.com/nim-lang/uirelays
+          nimble install -y https://github.com/Araq/iconbundler
 
       - name: Build focim
         shell: bash
@@ -186,11 +192,6 @@ jobs:
           cp "$exe" "$stage/$exe"
           cp README.md LICENSE "$stage/"
           cp doc/config.md "$stage/config.md"
-          # The shipped vocabulary, which the editor looks for in `data/` next
-          # to its binary -- without it `Ctrl+Space` starts out knowing only
-          # the words in the open buffers.
-          mkdir -p "$stage/data"
-          cp data/nimony.txt "$stage/data/"
 
           cat > "$stage/NIGHTLY.txt" <<EOF
           focim -- the Focussed Nim Editor, nightly build
@@ -221,6 +222,89 @@ jobs:
               xattr -dr com.apple.quarantine focim.app
           MAC
           fi
+
+      # A bare ELF file has no icon: on Linux the icon is a PNG in the hicolor
+      # theme and a `.desktop` entry that names it, and both are files rather
+      # than anything inside the binary. iconbundler writes them -- into the
+      # package rather than into this runner's home, by pointing XDG_DATA_HOME
+      # at the staging directory. `install.sh` then puts them where a desktop
+      # looks, with `Exec=` pointing at wherever the archive was extracted,
+      # which is the one thing that cannot be decided here.
+      - name: Bundle the desktop entry and icons (Linux)
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.nimble/bin:$PATH"
+          stage=staging/focim
+          XDG_DATA_HOME="$PWD/$stage/share" iconbundler focim "$PWD/$stage/focim" \
+            src/focim-icon.png \
+            --name focim --generic-name 'Text Editor' \
+            --comment 'Focussed Nim Editor' \
+            --categories 'Development;TextEditor;'
+
+          # The caches belong to whoever installs this and not to this runner:
+          # shipping them would overwrite the ones listing the user's own
+          # applications with a pair that knows about focim alone.
+          rm -f "$stage/share/applications/mimeinfo.cache" \
+                "$stage/share/icons/hicolor/icon-theme.cache"
+
+          test -f "$stage/share/applications/focim.desktop"
+          for px in 32 48 64 128 256; do
+            test -f "$stage/share/icons/hicolor/${px}x${px}/apps/focim.png"
+          done
+          grep -q '^StartupWMClass=focim$' "$stage/share/applications/focim.desktop"
+          echo "the desktop entry and five icon sizes are in the package"
+
+          cat > "$stage/install.sh" <<'SH'
+          #!/bin/sh
+          # Puts this build in the desktop's menu: the icons and the .desktop
+          # entry that iconbundler made at build time, with Exec= rewritten to
+          # where this archive actually sits. Undo it by deleting the two paths
+          # printed at the end. Nothing is installed system-wide and nothing
+          # needs root.
+          set -eu
+          here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          data=${XDG_DATA_HOME:-$HOME/.local/share}
+
+          mkdir -p "$data/applications"
+          # awk and not sed: the replacement is a path the user chose, and awk
+          # takes it as a value rather than as a pattern with `&` and `\` in it.
+          awk -v p="$here/focim" '
+            BEGIN { gsub(/[\\"]/, "\\\\&", p); line = "Exec=\"" p "\"" }
+            /^Exec=/ { print line; next }
+            { print }
+          ' "$here/share/applications/focim.desktop" \
+            > "$data/applications/focim.desktop"
+
+          for px in 32 48 64 128 256; do
+            mkdir -p "$data/icons/hicolor/${px}x${px}/apps"
+            cp "$here/share/icons/hicolor/${px}x${px}/apps/focim.png" \
+               "$data/icons/hicolor/${px}x${px}/apps/focim.png"
+          done
+
+          # Without these the entry shows up at the next login rather than now.
+          # Neither tool has to be installed for the installation to be good.
+          command -v update-desktop-database >/dev/null 2>&1 &&
+            update-desktop-database "$data/applications" || true
+          command -v gtk-update-icon-cache >/dev/null 2>&1 &&
+            gtk-update-icon-cache -f -t "$data/icons/hicolor" || true
+
+          echo "menu entry: $data/applications/focim.desktop"
+          echo "icons:      $data/icons/hicolor/*/apps/focim.png"
+          echo "running:    $here/focim"
+          SH
+          chmod +x "$stage/install.sh"
+
+          cat >> "$stage/NIGHTLY.txt" <<'LINUX'
+
+          ./install.sh puts focim in the desktop menu with its icon: it copies
+          the hicolor PNGs and share/applications/focim.desktop into your
+          ~/.local/share and points the entry at this directory. Run it after
+          moving the directory somewhere permanent, since the entry names the
+          path it was run from. A bare binary has no icon on Linux; that is
+          what the entry is for.
+          LINUX
 
       - name: Smoke test under Xvfb (Linux)
         if: runner.os == 'Linux'
@@ -289,7 +373,6 @@ jobs:
         run: |
           set -euo pipefail
           export PATH="$HOME/.nimble/bin:$PATH"
-          nimble install -y https://github.com/Araq/iconbundler
           # The art is copied out of the checkout first: iconbundler writes
           # what it derives next to the source PNG, and the working tree is
           # not the place for that.
@@ -409,10 +492,11 @@ jobs:
           - Windows x86_64: focim-${V}-${S}-windows_amd64.zip
 
           Extract and run focim. On Linux, libX11.so.6 and libXft.so.2 are
-          loaded at runtime and have to be present. The macOS archive also
-          holds focim.app, the same build as a bundle, which is what shows the
-          icon there. Tab 0 is [config]: its text is the window's layout and
-          color theme.
+          loaded at runtime and have to be present, and ./install.sh in the
+          archive puts focim in the desktop menu with its icon. The macOS
+          archive also holds focim.app, the same build as a bundle, which is
+          what shows the icon there; on Windows the .exe carries it itself.
+          Tab 0 is [config]: its text is the window's layout and color theme.
           EOF
           )
           gh release edit '${{ needs.prepare.outputs.tag }}' --repo "$GITHUB_REPOSITORY" --notes "$notes"

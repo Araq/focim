@@ -133,20 +133,22 @@ other, numbered, and Ctrl+1 .. Ctrl+9 paste one at the caret. See
 `doc/clipboard.md`.
 
 Icon: `focim-icon.png` is the source art, and the files built from it that are
-checked in next to it -- `focim-icon.netwm` for X11, `focim.ico` / `.rc` /
-`.res` for Windows. Deriving those from the PNG, and installing the desktop
-entry or the `.app` bundle, is somebody else's job: `iconbundler`
+checked in next to it -- `focim-icon.netwm`, which the X11 branch below
+`staticRead`s, and `focim.ico` / `.rc` / `.res`, which the Windows branch
+links. Deriving those from the PNG, and installing the desktop entry or the
+`.app` bundle, is somebody else's job: `iconbundler`
 (https://github.com/Araq/iconbundler), which is a tool for any desktop
-application and does not belong in an editor. After changing the PNG, from
-`src/`:
+application and does not belong in an editor. It is a dependency, so:
 
-    iconbundler --prepare focim
+    nimble icons      # after changing the PNG: remakes the four files above
+    nimble bundle     # builds, and gives this build to the desktop
 
-and to install this build for the desktop as well:
-
-    iconbundler focim ../focim focim-icon.png \
-      --generic-name "Text Editor" --comment "Focussed Nim Editor" \
-      --categories "Development;TextEditor;"
+They are checked in rather than made by every build on purpose. Three of them
+are inputs to the compiler, so a machine with no ImageMagick has to be able to
+build all the same -- and two image tools do not resample a PNG to the same
+bytes, so a build that remade them would rewrite files nobody edited. A
+checkout that is missing one gets it made: that is the `before build` hook in
+`focim.nimble`.
 
 `StartupWMClass` / the bundle id stem must match the name of the executable,
 which is what lands in `WM_CLASS` -- so the binary has to stay called `focim`.
@@ -267,8 +269,16 @@ const
   WordsDirName = "words"
     ## Under the config dir: one file per indexed path, so that `index` is
     ## paid for once and not on every start.
-  ShippedWords = "nimony.txt"
-    ## The vocabulary that comes with the editor, next to the binary.
+  ShippedWords = staticRead("../data/nimony.txt")
+    ## The vocabulary that comes with the editor -- in it, the way the icon
+    ## is. It was a file beside the binary and that is one thing too many to
+    ## get right: `nimble build` leaves the binary in the checkout, `nimble
+    ## install` puts it in a package directory, an archive is extracted
+    ## wherever, and a vocabulary that is missing is not an error anybody
+    ## sees -- completion simply knows less and nobody can tell why. Twelve
+    ## kilobytes in a binary that already carries eighty-six of icon settles
+    ## it. `data/nimony.txt` stays the source: `tools/mkwordlist.nim` writes
+    ## it, and what is compiled in is whatever it says at build time.
   MaxPreviewChars = 60
     ## How much of a line a tracking row quotes. A row is a thing to recognize
     ## a place by, not a place to read the code in.
@@ -896,11 +906,10 @@ proc loadWordSet(words: var WordIndex; file: string) =
 
 proc loadWordSets(words: var WordIndex) =
   ## The shipped vocabulary, then everything `index` stored in earlier runs.
-  for p in [getAppDir() / "data" / ShippedWords,
-            getAppDir().parentDir / "data" / ShippedWords]:
-    if fileExists(p):
-      loadWordSet(words, p)
-      break
+  block:
+    var ws = parseWordSet(ShippedWords)
+    if ws.name.len == 0: ws.name = "nimony"
+    words.addSet ws
   try:
     for kind, p in walkDir(configPath(WordsDirName)):
       if kind == pcFile and p.endsWith(".txt"):
