@@ -30,19 +30,24 @@ each with its own *flipped* edit semantics:
   back to: `[Editor]` for the directory of the file in the editor,
   `[Terminal]` for the one the terminal is in.
 
-The same idea applied to the window itself: tab 0 is `[config]`, and its text
-IS the NIF `(config ...)` this app is built from -- the `(layout ...)` that
-places the widgets and the `(theme ...)` that colors them. Editing it
-relayouts and recolors the window on the next frame, so there is no separate
-settings dialog either. Leaving a widget out of the layout hides it without
-destroying it -- its buffer, cursor and scroll position are still there when a
-later layout lists it again. Only the `editor` cell has to stay, since it is
-where the config gets typed. A config that does not parse is reported in the
-status bar, with the line and column of the mistake, and ignored, so the last
-good one keeps the window usable; a theme whose text would be unreadable on
-its own background is refused the same way. Every color in it is written as
-`"#RRGGBB"`, which SynEdit draws a chip of, so the palette is visible while it
-is being edited.
+The same idea applied to the window itself: tabs 0 and 1 are `[config]` and
+`[layout]`, and their text IS the NIF this app is built from -- the
+`(config ...)` whose `(theme ...)` colors the widgets, and the `(layout ...)`
+that places them. Editing one recolors the window on the next frame and
+editing the other relayouts it, so there is no separate settings dialog
+either. Two lanes rather than one file because they answer different questions
+and change on different days: the colors are picked once, the panels are
+shoved about all the time, and a theme that arrived in the same text as the
+layout could not be replaced without replacing the layout with it.
+
+Leaving a widget out of the layout hides it without destroying it -- its
+buffer, cursor and scroll position are still there when a later layout lists
+it again. Only the `editor` cell has to stay, since it is where the layout
+gets typed. A lane that does not parse is reported in the status bar, with the
+line and column of the mistake, and ignored, so the last good one keeps the
+window usable; a theme whose text would be unreadable on its own background is
+refused the same way. Every color is written as `"#RRGGBB"`, which SynEdit
+draws a chip of, so the palette is visible while it is being edited.
 
 Both the terminal and the status bar take commands, and some of them act on the
 buffer rather than on the machine: `o <file>` / `open <file>` opens one, `s` /
@@ -69,21 +74,22 @@ bytes -- a `touch`, a checkout that put the same text back -- is not a change
 and is not mentioned. The explorer relists itself the same way, keeping the
 filter that is typed in it and the place it is scrolled to.
 
-`defaults`, in the prompt, puts the config the app ships with back into the
-`[config]` tab -- for a config that has been edited into a corner: a flattened
-palette, a layout with the panel one is looking for left out of it. It is an
-edit like any other, so `Ctrl+Z` in that tab brings the old config back. Only
-the prompt understands the word; in the terminal it names a program, which is
-what the terminal is for.
+`defaults`, in the prompt, puts what the app ships with back into both lanes
+-- for settings that have been edited into a corner: a flattened palette, a
+layout with the panel one is looking for left out of it. It is an edit like
+any other, so `Ctrl+Z` in either tab brings the old text back. Only the prompt
+understands the word; in the terminal it names a program, which is what the
+terminal is for.
 
 `theme` is the same door with more than one thing behind it: three configs
 ship with the editor, `theme` lists them and `theme paper` puts one in the
-tab. A theme is a whole config rather than a palette spliced into the one
+tab. A theme is that whole lane rather than a palette spliced into the text
 that is there -- it is written out of a `Theme` object, every field and every
 token class, so nothing of the theme it replaces is left standing. What it
 replaces is not lost either: `Ctrl+Z` has it for the session, and a config
 that had been edited by hand goes to `config-backup.nif` beside `config.nif`
-before the edit is made. See `doc/config.md`.
+before the edit is made. `[layout]` is not touched by any of it. See
+`doc/config.md`.
 
 `find`, `findall`, `next`, `prev`, `replace` and `replaceall` are the same idea
 applied to searching: no dialog, one line of text, and every match highlighted
@@ -115,8 +121,13 @@ caret keys above it; Ctrl+C copies while something is selected and stops the
 running program when nothing is. A program that prints while its output is
 being read leaves both the caret and the scroll position alone.
 
-The config and the list of open tabs are stored under `getConfigDir()` in
-`focim/config.nif` and `focim/tabs.txt`, so both survive a restart.
+The settings and the list of open tabs are stored under `getConfigDir()` in
+`focim/layout.nif`, `focim/config.nif` and `focim/tabs.txt`, so all of it
+survives a restart. The two `.nif` files are the `[layout]` and `[config]`
+tabs, and each is written back whenever the tab it belongs to parses. They
+were one file once; a config that still has a `(layout ...)` in it has that
+block moved across on the first start, and keeps a copy of itself while that
+happens.
 
 Markdown is still SynEdit, not a browser pane. Headings, links and fenced
 code light up in place; Cmd/Ctrl+click on a `[label](path)` opens a relative
@@ -277,9 +288,12 @@ static:
     let c = parseConfig(ShippedConfigs[i])
     doAssert c.error.len == 0, ShippedThemes[i].name & ": " & c.error
     doAssert c.note.len == 0, ShippedThemes[i].name & ": " & c.note
-    for name in RequiredCells:
-      doAssert name in c.layout.resolve(1024, 768, lineHeight = 16),
-               ShippedThemes[i].name & ": no '" & name & "' cell"
+  # The other lane says where the widgets go, and the app needs some of them.
+  let l = parseLayout(defaultLayout)
+  doAssert l.error.len == 0, "the shipped layout: " & l.error
+  for name in RequiredCells:
+    doAssert name in l.resolve(1024, 768, lineHeight = 16),
+             "the shipped layout has no '" & name & "' cell"
 
 var gUiScale = 100
   ## Percent to enlarge text by on this display, from `ScreenLayout.uiScale`.
@@ -345,10 +359,22 @@ proc extractFilePosition(s: SynEdit; pos: int):
     result = (path, -1, -1, a, b)
 
 type
+  BufferKind = enum
+    ## A buffer is a file, or it is one of the two settings *lanes*: a tab
+    ## whose text is a file under the config dir and takes effect as it is
+    ## typed. Two of them rather than one because they answer different
+    ## questions and change on different days -- the colors are picked once
+    ## and the panels are shoved about all the time -- and because a theme
+    ## that arrived in the same text as the layout could not be replaced
+    ## without replacing the layout too.
+    bufFile,            ## a file, or a scratch buffer with no file yet
+    bufConfig,          ## this buffer's text IS `config.nif`: theme, tracking
+    bufLayout           ## this buffer's text IS `layout.nif`: where things go
+
   BufferEntry = object
     ed: SynEdit
     path: string        ## "" for generated buffers
-    isConfig: bool      ## this buffer's text IS the window's config
+    kind: BufferKind    ## a file, or one of the settings lanes
     idx: BufferIndexer  ## how far the word index has walked this buffer
     search: BufferSearch ## the hits of the last search in this buffer
     watch: bool         ## does this buffer stand for what is in a file? A
@@ -360,6 +386,21 @@ type
                         ## write through this buffer. What `harddiskCheck`
                         ## compares against, and the whole of what it takes to
                         ## notice that somebody else has written the file.
+
+proc isLane(b: BufferEntry): bool = b.kind != bufFile
+  ## A lane stands for a settings file rather than for a file somebody opened:
+  ## it saves itself, it cannot be closed, and no `open` ever lands on it.
+
+proc laneStem(k: BufferKind): string =
+  ## The lane's file, without the extension: also its name in the tab list and
+  ## the stem its backups are numbered off. One word, said once.
+  case k
+  of bufFile: ""
+  of bufConfig: "config"
+  of bufLayout: "layout"
+
+proc laneName(k: BufferKind): string = "[" & laneStem(k) & "]"
+proc laneFile(k: BufferKind): string = laneStem(k) & ".nif"
 
 proc fileStamp(path: string): Time =
   ## The file's modification time, or the zero time for a file that cannot be
@@ -491,7 +532,7 @@ proc displayNames(buffers: seq[BufferEntry]): seq[string] =
   var base: seq[string] = @[]
   for b in buffers:
     base.add(
-      if b.isConfig: "[config]"
+      if b.isLane: laneName(b.kind)
       elif b.path.len > 0: b.path.extractFilename
       else: "[scratch]")
   result = @[]
@@ -588,9 +629,9 @@ proc applyTabEdits(tabs: var TabList; buffers: var seq[BufferEntry];
   # Some tabs refuse to close: put their line back.
   for i in 0 ..< tabs.names.len:
     if not taken[i]:
-      if buffers[i].isConfig:
-        # Closing it would leave no way to edit the config back.
-        tabs.note = "the config buffer stays open"
+      if buffers[i].isLane:
+        # Closing it would leave no way to edit the settings back.
+        tabs.note = laneName(buffers[i].kind) & " stays open"
       elif buffers[i].path.len > 0 and buffers[i].ed.changed:
         # A buffer without a path cannot be saved, so the guard would be
         # a trap rather than a warning.
@@ -613,29 +654,50 @@ proc applyTabEdits(tabs: var TabList; buffers: var seq[BufferEntry];
   for i, n in newNames:
     if n == currentName: current = i
 
-proc reparseConfig(src: string; width, height, lineHeight: int;
-                   layout: var Layout; theme: var Theme; track: var Track;
+proc laneNote(laneNotes: array[BufferKind, string]; fallback: string): string =
+  ## What the status bar says: a lane that cannot be used says why, and the
+  ## config lane goes first -- a window with the wrong colors is still a
+  ## window, and a window whose theme was refused is showing the very text
+  ## that has to be corrected.
+  if laneNotes[bufConfig].len > 0: laneNotes[bufConfig]
+  elif laneNotes[bufLayout].len > 0: laneNotes[bufLayout]
+  else: fallback
+
+proc reparseConfig(src: string; theme: var Theme; track: var Track;
                    note: var string) =
-  ## The config buffer's text IS the window. A config that does not parse, or
-  ## that loses a cell the app needs, is reported and dropped -- the last good
-  ## one keeps the window usable so the text can be corrected. A theme that
-  ## cannot be read is dropped by the parser in the same spirit, and says so in
-  ## `note` while the rest of the config is kept.
+  ## The [config] buffer's text IS the colors of the window and the compiler
+  ## behind a Ctrl+click. One that does not parse is reported and dropped --
+  ## the last good one keeps the window usable so the text can be corrected.
+  ## A theme that cannot be read is dropped by the parser in the same spirit,
+  ## and says so in `note` while the rest of the config is kept.
   let parsed = parseConfig(src)
   if parsed.error.len > 0:
     note = "config: " & parsed.error
     return
-  let cells = parsed.layout.resolve(width, height, lineHeight,
-                                    padding = scaledPx(6), gap = scaledPx(4),
-                                    uiScale = gUiScale)
-  for name in RequiredCells:
-    if name notin cells:
-      note = "config: no '" & name & "' cell"
-      return
-  layout = parsed.layout
   theme = parsed.theme
   track = parsed.track
   note = parsed.note
+
+proc reparseLayout(src: string; width, height, lineHeight: int;
+                   layout: var Layout; note: var string) =
+  ## And the [layout] buffer's text IS where the widgets go. Dropped on the
+  ## same terms, with one more of them: a layout that resolves without the
+  ## cells the app cannot do without is refused as well, since the first of
+  ## those is the editor -- and a window with no editor in it has nowhere to
+  ## type the layout back.
+  let parsed = parseLayout(src)
+  if parsed.error.len > 0:
+    note = "layout: " & parsed.error
+    return
+  let cells = parsed.resolve(width, height, lineHeight,
+                             padding = scaledPx(6), gap = scaledPx(4),
+                             uiScale = gUiScale)
+  for name in RequiredCells:
+    if name notin cells:
+      note = "layout: no '" & name & "' cell"
+      return
+  layout = parsed
+  note = ""
 
 # ---------------------------------------------------------------------------
 # Explorer -- a flat listing of one directory, with an editable path line
@@ -995,7 +1057,7 @@ proc sourceLine(path: string; line: int; buffers: seq[BufferEntry];
   ## exactly the case where the text on disk would be misleading. Everything
   ## else is read once per file, however many rows point into it.
   for b in buffers:
-    if b.path == path and not b.isConfig:
+    if b.path == path and not b.isLane:
       return b.ed.getLineText(line - 1).strip
   if path notin cache:
     var lines: seq[string] = @[]
@@ -1169,7 +1231,8 @@ proc saveCurrent(buffers: var seq[BufferEntry]; current: int;
   ## says so instead of quietly doing nothing.
   if buffers[current].path.len == 0:
     note =
-      if buffers[current].isConfig: "[config] saves itself"
+      if buffers[current].isLane: laneName(buffers[current].kind) &
+                                  " saves itself"
       else: "this buffer has no file yet: try 's <name>'"
     return
   try:
@@ -1190,10 +1253,11 @@ proc saveBufferAs(buffers: var seq[BufferEntry]; current: int; path: string;
   except CatchableError:
     note = "cannot save " & path & ": " & getCurrentExceptionMsg()
     return
-  if buffers[current].isConfig:
-    # A copy of the config, not a move: tab 0 is where the window is edited,
-    # and `config.nif` under the config dir is where it is read from.
-    note = "wrote " & path.extractFilename & "; [config] stays where it is"
+  if buffers[current].isLane:
+    # A copy of the lane, not a move: the tab is where the setting is edited,
+    # and the file under the config dir is where it is read from.
+    note = "wrote " & path.extractFilename & "; " &
+           laneName(buffers[current].kind) & " stays where it is"
     return
   var full = path
   try: full = expandFilename(path)
@@ -1467,43 +1531,66 @@ type
     putSame      ## the tab already says exactly this
     putDone      ## replaced
 
-proc putConfig(buffers: var seq[BufferEntry]; text: string;
-               saved: var string): ConfigPut =
-  ## Put `text` into the [config] tab as an *edit*, so that Ctrl+Z in that tab
-  ## brings back what was there -- which is why nothing is asked first: what
-  ## this replaces is one keystroke away for as long as the tab is open. A
-  ## config that was written by hand goes to a file as well, since a keystroke
-  ## only lasts as long as the session does; `saved` says where, or is "" when
-  ## there was nothing to save (this is one of the shipped configs) or nowhere
-  ## to save it. The main loop does the rest: it already reparses and stores
-  ## that buffer whenever it changed.
+proc isShipped(kind: BufferKind; text: string): bool =
+  ## Whether a lane still says exactly what the app put there. Anything else
+  ## is somebody's own work, and is kept before it is replaced.
+  case kind
+  of bufFile: false
+  of bufConfig: shippedName(text).len > 0
+  of bufLayout: text == defaultLayout
+
+proc putLane(buffers: var seq[BufferEntry]; kind: BufferKind; text: string;
+             saved: var string): ConfigPut =
+  ## Put `text` into a lane as an *edit*, so that Ctrl+Z in that tab brings
+  ## back what was there -- which is why nothing is asked first: what this
+  ## replaces is one keystroke away for as long as the tab is open. Text that
+  ## was written by hand goes to a file as well, since a keystroke only lasts
+  ## as long as the session does; `saved` says where, or is "" when there was
+  ## nothing to save (the lane holds what the app shipped) or nowhere to save
+  ## it. The main loop does the rest: it already reparses and stores a lane
+  ## whenever it changed.
   saved = ""
   for b in buffers.mitems:
-    if b.isConfig:
+    if b.kind == kind:
       let old = b.ed.fullText
       if old == text: return putSame
-      if shippedName(old).len == 0 and old.strip.len > 0:
-        saved = backupConfig(old)
+      if not isShipped(kind, old) and old.strip.len > 0:
+        saved = backupConfig(laneStem(kind), old)
       if b.ed.len > 0: b.ed.replaceRange(0, b.ed.len - 1, text)
       else: b.ed.insertText(text)
       return putDone
   result = putNoTab
 
-proc putNote(outcome: ConfigPut; saved, what: string; note: var string) =
+proc putNote(outcome: ConfigPut; kind: BufferKind; saved, what: string;
+             note: var string) =
   ## The one line all of this has to be said in.
   case outcome
-  of putNoTab: note = "there is no [config] tab to put it in"
-  of putSame: note = "the config already is " & what
+  of putNoTab: note = "there is no " & laneName(kind) & " tab to put it in"
+  of putSame: note = laneName(kind) & " already is " & what
   of putDone:
-    note = "config: " & what
+    note = laneName(kind) & ": " & what
     if saved.len > 0: note.add "; the edited one is in " & saved
-    else: note.add "; Ctrl+Z in [config] undoes it"
+    else: note.add "; Ctrl+Z in " & laneName(kind) & " undoes it"
 
 proc runDefaults(buffers: var seq[BufferEntry]; note: var string) =
-  ## `defaults`: put the config the app ships with back into the [config] tab.
-  var saved = ""
-  putNote(putConfig(buffers, defaultConfig, saved), saved,
-          "the defaults (" & ShippedThemes[0].name & ")", note)
+  ## `defaults`: put back what the app ships with -- both lanes of it, since
+  ## the window one is looking at is the two of them together, and since that
+  ## is what this word put back when they were one file.
+  var savedConfig, savedLayout = ""
+  let c = putLane(buffers, bufConfig, defaultConfig, savedConfig)
+  let l = putLane(buffers, bufLayout, defaultLayout, savedLayout)
+  if c == putSame and l == putSame:
+    note = "both lanes already say what the app ships with"
+    return
+  note = "config and layout back to the defaults (" & ShippedThemes[0].name &
+         ")"
+  var kept: seq[string] = @[]
+  if savedConfig.len > 0: kept.add savedConfig
+  if savedLayout.len > 0: kept.add savedLayout
+  if kept.len == 0: note.add "; Ctrl+Z in a lane undoes it"
+  else:
+    note.add "; the edited " & (if kept.len == 1: "one is" else: "ones are") &
+             " in " & kept.join(" and ")
 
 proc themeList(buffers: seq[BufferEntry]): string =
   ## What `theme` on its own answers: the names, what each one looks like, and
@@ -1514,17 +1601,17 @@ proc themeList(buffers: seq[BufferEntry]): string =
     result.add ShippedThemes[i].name & " (" & ShippedThemes[i].blurb & ")"
   var now = ""
   for b in buffers:
-    if b.isConfig:
+    if b.kind == bufConfig:
       now = shippedName(b.ed.fullText)
       break
   result.add "; now: " & (if now.len > 0: now else: "a config of your own")
 
 proc runTheme(name: string; buffers: var seq[BufferEntry]; note: var string) =
   ## `theme` lists what there is, `theme <name>` puts one of them in the
-  ## [config] tab. A theme is a whole config and not a palette spliced into
-  ## the one that is there: the layout that comes with it is the shipped one,
-  ## and a config that had been edited is saved off to a file first -- see
-  ## `putConfig`.
+  ## [config] tab. A theme is that whole lane and not a palette spliced into
+  ## the text that is there, and a config that had been edited is saved off to
+  ## a file first -- see `putLane`. The [layout] lane is not touched: where
+  ## the panels are has nothing to do with what color they are.
   if name.len == 0:
     note = themeList(buffers)
     return
@@ -1533,7 +1620,8 @@ proc runTheme(name: string; buffers: var seq[BufferEntry]; note: var string) =
       # The very text `shippedName` recognizes, so that a tab holding a theme
       # is a tab nothing has to be backed up out of when the next one lands.
       var saved = ""
-      putNote(putConfig(buffers, ShippedConfigs[i], saved), saved, name, note)
+      putNote(putLane(buffers, bufConfig, ShippedConfigs[i], saved), bufConfig,
+              saved, name, note)
       return
   note = "'" & name & "' is not one of the themes: " & themeNames()
 
@@ -1714,32 +1802,69 @@ proc main =
   var statusFontSize = DefaultFontSize
   var editorFontSize = DefaultFontSize
 
-  # The config the window starts with: whatever was stored last time, unless it
-  # no longer works -- then the default, with the reason in the status bar.
+  # What the window starts as: whatever was stored last time, unless it no
+  # longer works -- then the default, with the reason in the status bar. The
+  # shipped ones go through the same door first, so that a mistake in what the
+  # app itself ships is caught here and not in somebody's window.
   var layout = default(Layout)
   var theme = defaultTheme()
   var trackSpec = defaultTrack()
-  var configNote = ""
-  reparseConfig(defaultConfig, width, height, fm.lineHeight, layout, theme,
-                trackSpec, configNote)
-  doAssert configNote.len == 0, configNote
+  var laneNotes: array[BufferKind, string]
+  reparseConfig(defaultConfig, theme, trackSpec, laneNotes[bufConfig])
+  doAssert laneNotes[bufConfig].len == 0, laneNotes[bufConfig]
+  reparseLayout(defaultLayout, width, height, fm.lineHeight, layout,
+                laneNotes[bufLayout])
+  doAssert laneNotes[bufLayout].len == 0, laneNotes[bufLayout]
+
   var configText = loadConfig("config.nif")
+  var layoutText = loadConfig("layout.nif")
+  # A config from when the layout lived in it: move the block across before
+  # anything is parsed, and keep the file it came out of. Runs once -- what it
+  # writes has no layout in it to find the next time.
+  var moved = ""
+  block:
+    var taken = ""
+    let rest = takeLayout(configText, taken)
+    if taken.len > 0:
+      let kept = backupConfig("config", configText)
+      configText = rest
+      saveConfig("config.nif", configText)
+      if layoutText.len == 0:
+        layoutText = taken
+        saveConfig("layout.nif", layoutText)
+        moved = "the layout moved to " & configPath("layout.nif")
+      else:
+        # There is a layout.nif already, so the one in the config is the older
+        # of the two and nothing is lost by dropping it -- least of all here,
+        # where the file it was in has just been copied.
+        moved = "the layout in config.nif was left behind; layout.nif has one"
+      if kept.len > 0: moved.add "; the config it was in is in " & kept
+
   if configText.len > 0:
-    reparseConfig(configText, width, height, fm.lineHeight, layout, theme,
-                  trackSpec, configNote)
-    if configNote.len > 0:
+    reparseConfig(configText, theme, trackSpec, laneNotes[bufConfig])
+    if laneNotes[bufConfig].len > 0:
       # Whatever was wrong with it, the stored text stays in the buffer: it is
       # what has to be corrected. Until it parses the window runs on the
       # default, which the call above left in place.
-      configNote = configPath("config.nif") & ": " & configNote
+      laneNotes[bufConfig] = configPath("config.nif") & ": " &
+                             laneNotes[bufConfig]
   else:
     configText = defaultConfig
+  if layoutText.len > 0:
+    reparseLayout(layoutText, width, height, fm.lineHeight, layout,
+                  laneNotes[bufLayout])
+    if laneNotes[bufLayout].len > 0:
+      laneNotes[bufLayout] = configPath("layout.nif") & ": " &
+                             laneNotes[bufLayout]
+  else:
+    layoutText = defaultLayout
 
-  # Buffer list. The config buffer is tab 0: editing it relayouts and recolors
-  # the window on the next frame. The rest of the tabs are last session's.
+  # Buffer list. The two lanes are tabs 0 and 1: editing one recolors the
+  # window on the next frame, editing the other relayouts it. The rest of the
+  # tabs are last session's.
   var buffers: seq[BufferEntry]
   var current = 0
-  block:
+  for lane in [(bufConfig, configText), (bufLayout, layoutText)]:
     var ed = createSynEdit(fonts.fontForSize(editorFontSize))
     # NIF is close enough to Nim for the tokenizer: parentheses, names, numbers
     # and '#' comments all land where they should -- and a quoted "#RRGGBB" is
@@ -1748,18 +1873,26 @@ proc main =
     ed.lang = langNim
     ed.flags = {rfColorLiterals}
     ed.showLineNumbers = true
-    ed.setText(configText)
-    buffers.add BufferEntry(ed: ed, path: "", isConfig: true)
+    ed.setText(lane[1])
+    buffers.add BufferEntry(ed: ed, path: "", kind: lane[0])
   for line in loadConfig("tabs.txt").splitLines:
     let p = line.strip
     if p.len > 0 and fileExists(p):
       discard buffers.openFile(fonts.fontForSize(editorFontSize), p, -1, -1)
   if paramCount() >= 1:
     current = buffers.openFile(fonts.fontForSize(editorFontSize), paramStr(1), -1, -1)
-  elif buffers.len > 1:
-    current = 1
+  else:
+    # The first tab that is a file, if the last session left one; otherwise the
+    # config lane, which is at least something to look at.
+    for i, b in buffers:
+      if not b.isLane:
+        current = i
+        break
 
   var savedTabs = tabsText(buffers)
+  # Said once the tabs exist to say it in: a move nobody asked for is a thing
+  # to be told about, and both halves of it are open in front of them.
+  if moved.len > 0: tabs.note = moved
 
   renderTabs(tabs, buffers)
   explorer.showDir(
@@ -1852,11 +1985,18 @@ proc main =
     # The buffer's own changed flag is the signal; consuming it here re-parses
     # once per edit, whether the new config works out or not.
     for b in buffers.mitems:
-      if b.isConfig and b.ed.changed:
+      if b.isLane and b.ed.changed:
         let src = b.ed.fullText
-        reparseConfig(src, width, height, fm.lineHeight, layout, theme,
-                      trackSpec, configNote)
-        if configNote.len == 0: saveConfig("config.nif", src)
+        case b.kind
+        of bufConfig: reparseConfig(src, theme, trackSpec, laneNotes[bufConfig])
+        of bufLayout:
+          reparseLayout(src, width, height, fm.lineHeight, layout,
+                        laneNotes[bufLayout])
+        of bufFile: discard
+        # Stored only once it works. A file that says something the window
+        # could not be built from would come back as the same complaint on
+        # every start, and the text that has to be corrected is in the tab.
+        if laneNotes[b.kind].len == 0: saveConfig(laneFile(b.kind), src)
         b.ed.markSaved()
         mustDraw = true
 
@@ -2369,9 +2509,9 @@ proc main =
       term.ed.underline(-1, -1)
 
     # Status bar / prompt -- update prefix when not focused
-    # A broken config is the more urgent of the two notes: it is what the
-    # user is looking at while typing in the [config] tab.
-    let note = if configNote.len > 0: configNote else: tabs.note
+    # A lane that does not parse is the more urgent of the two notes: it is
+    # what the user is looking at while typing in that tab.
+    let note = laneNote(laneNotes, tabs.note)
     if focus != "status":
       updateStatus(status, buffers[current].ed, buffers[current].path, note)
     var statusAct = TermAction(kind: noAction)
@@ -2381,7 +2521,7 @@ proc main =
       # The command has just changed what the line says about the buffer, and
       # the prompt it left behind belongs to a terminal, not to a status bar.
       updateStatus(status, buffers[current].ed, buffers[current].path,
-                   if configNote.len > 0: configNote else: tabs.note)
+                   laneNote(laneNotes, tabs.note))
     endExchange(statusAct)
     case statusAct.kind
     of openFile:

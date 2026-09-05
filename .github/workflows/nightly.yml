@@ -200,11 +200,11 @@ jobs:
           date:            ${{ needs.prepare.outputs.date }}
           platform:        ${{ matrix.os }}_${{ matrix.cpu }}
 
-          Run ./$exe, optionally with a file to open. Tab 0 is [config]: its text
-          is the layout and the color theme, and editing it changes the window on
-          the next frame. See config.md.
+          Run ./$exe, optionally with a file to open. Tabs 0 and 1 are [config]
+          and [layout]: their text is the color theme and the window's shape, and
+          editing either changes the window on the next frame. See config.md.
 
-          The config and the list of open tabs are written to focim/ under your
+          Both, and the list of open tabs, are written to focim/ under your
           config directory (~/.config/focim on Linux).
 
           On Linux the binary links only libc; X11 is loaded at runtime, so
@@ -496,7 +496,8 @@ jobs:
           archive puts focim in the desktop menu with its icon. The macOS
           archive also holds focim.app, the same build as a bundle, which is
           what shows the icon there; on Windows the .exe carries it itself.
-          Tab 0 is [config]: its text is the window's layout and color theme.
+          Tabs 0 and 1 are [config] and [layout]: their text is the color theme
+          and the window's shape.
           EOF
           )
           gh release edit '${{ needs.prepare.outputs.tag }}' --repo "$GITHUB_REPOSITORY" --notes "$notes"

@@ -6,15 +6,17 @@ itself is one of them.
 
 ![focim](screenshots/focim.png)
 
-Tab 0 is `[config]`, and its text *is* the `(config ...)` the editor is built
-from -- the `(layout ...)` that places the widgets and the `(theme ...)` that
-colors them. Editing it relayouts and recolors the window on the next frame,
-so there is no settings dialog. A config that does not parse is reported in
-the status bar with the line and column of the mistake and then ignored, so
-the last good one keeps the window usable. Three configs ship with it --
-`theme` in the prompt lists them, `theme paper` puts one in the tab -- and a
-config that had been edited is written to a backup file first, since a theme
-here is a whole config and not a coat of paint.
+Tabs 0 and 1 are `[config]` and `[layout]`, and their text *is* the editor:
+the `(theme ...)` that colors the widgets, and the `(layout ...)` that places
+them. Editing one recolors the window on the next frame and editing the other
+relayouts it, so there is no settings dialog. A lane that does not parse is
+reported in the status bar with the line and column of the mistake and then
+ignored, so the last good one keeps the window usable. Three configs ship with
+it -- `theme` in the prompt lists them, `theme paper` puts one in the tab --
+and a config that had been edited is written to a backup file first, since a
+theme is that whole lane and not a coat of paint. The layout is a lane of its
+own precisely so that picking a theme cannot cost you the shape of your
+window.
 
 The same idea runs through the rest of it. There is no tab bar and no tree
 view: the list of open tabs is an edit field whose lines are the tabs, so

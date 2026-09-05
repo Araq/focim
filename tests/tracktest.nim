@@ -189,7 +189,6 @@ echo "(track ...) in the config:"
 block:
   let c = parseConfig("""
 (config
-  (layout (editor))
   (track
     (compiler "nimony")
     (exe "/opt/nimony/bin/nimony")))
@@ -199,32 +198,32 @@ block:
   equals("the binary", c.track.exeName, "/opt/nimony/bin/nimony")
 
 block:
-  let c = parseConfig("(config (layout (editor)) (track (compiler \"none\")))")
+  let c = parseConfig("(config (track (compiler \"none\")))")
   check("parses", c.error.len == 0, c.error)
   equals("tracking can be turned off", $c.track.compiler, "none")
 
 block:
-  let c = parseConfig("(config (layout (editor)))")
+  let c = parseConfig("(config)")
   check("parses", c.error.len == 0, c.error)
   equals("a config that says nothing about it gets nim", $c.track.compiler,
          "nim")
   equals("run by its own name", c.track.exeName, "nim")
 
 block:
-  let c = parseConfig("(config (layout (editor)) (track (compiler \"gcc\")))")
+  let c = parseConfig("(config (track (compiler \"gcc\")))")
   check("a compiler nobody here can drive is refused", c.error.len > 0)
   check("and the message says which ones there are",
         "\"nimony\"" in c.error, c.error)
   equals("and nothing of it is kept", $c.track.compiler, "nim")
 
 block:
-  let c = parseConfig("(config (layout (editor)) (track (verbose \"yes\")))")
+  let c = parseConfig("(config (track (verbose \"yes\")))")
   check("an unknown track field is refused", c.error.len > 0)
   check("and it says what does belong there", "(compiler" in c.error, c.error)
 
 block:
   let c = parseConfig(
-    "(config (layout (editor)) (track (compiler \"nim\")) (track (exe \"x\")))")
+    "(config (track (compiler \"nim\")) (track (exe \"x\")))")
   check("only one (track ...) per config", c.error.len > 0)
 
 if failures > 0:

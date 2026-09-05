@@ -1,17 +1,13 @@
-# The config file
+# The config files
 
-One NIF file says where a window's widgets go, what they look like, and which
-compiler answers a Ctrl+click:
+Two NIF files under `getConfigDir()/focim`, and each is a tab: `[config]` says
+what the widgets look like and which compiler answers a Ctrl+click, `[layout]`
+says where they go. Typing in either takes effect on the next frame.
+
+`config.nif`:
 
 ```
 (config
-  (layout
-    (toolbar (lines 2))
-    (cols
-      (sidebar (px 250))
-      (divider (px 4))
-      (editor))
-    (status (lines 1)))
   (theme
     (bg "#15171B")
     (fg "#E6DFD1"
@@ -21,7 +17,32 @@ compiler answers a Ctrl+click:
     (compiler "nim")))
 ```
 
+`layout.nif`:
+
+```
+(layout
+  (toolbar (lines 2))
+  (cols
+    (sidebar (px 250))
+    (divider (px 4))
+    (editor))
+  (status (lines 1)))
+```
+
+They were one file once, and a config written then still works: the
+`(layout ...)` in it is moved to `layout.nif` the first time it is opened, the
+file it came out of is kept as `config-backup.nif`, and the status bar says
+so. Nothing is rewritten in the move -- both halves keep the comments and the
+spacing they were written with.
+
+The split is not tidiness. A theme is picked by replacing a whole lane (see
+below), and while the two shared a file, picking one meant losing the layout
+along with it -- your panel sizes were hostages of your colors. Two lanes, and
+neither can spend the other.
+
 # The layout
+
+`layout.nif`, and the `[layout]` tab. One `(layout ...)` fills the file.
 
 ## Boxes
 
@@ -81,6 +102,8 @@ stretching boxes, never off a `px` or `lines` one.
 
 # The theme
 
+`config.nif`, and the `[config]` tab, along with `(track ...)` below.
+
 The tags inside `(theme ...)` are the field names of `Theme` and the tags
 inside `(fg ...)` are the values of `TokenClass`, both spelled exactly as they
 appear in `focim/theme.nim`. There is nothing to look up and nothing that
@@ -139,19 +162,22 @@ Three configs come with the editor, and the prompt hands them out:
 | `theme dusk` | dark, gold and turquoise -- the one a fresh config names |
 | `theme mocha` | dark, Catppuccin Mocha |
 | `theme paper` | light, ink on paper |
-| `defaults` | the same as `theme dusk` |
+| `defaults` | both lanes back to what the app ships: `theme dusk` and the shipped layout |
 
-A theme here is a whole config and not a palette painted over the one that is
-there: what lands in the `[config]` tab is the shipped layout, the shipped
-tracking default, and that theme written out in full -- every field and every
-token class, so that no color of the previous theme is left standing in a
-corner of the window.
+A theme here is the whole `[config]` lane and not a palette painted over the
+text that is there: what lands in the tab is that theme written out in full --
+every field and every token class -- and the shipped tracking default. No
+color of the previous theme is left standing in a corner of the window. The
+`[layout]` lane is not touched at all: where the panels are has nothing to do
+with what color they are.
 
 Which means switching themes replaces a config that was edited. Two things
 keep that from costing anything. It is an ordinary edit, so `Ctrl+Z` in the
 `[config]` tab brings the old text straight back; and before the edit is made,
 a config that is not one of the three verbatim is written to
 `config-backup.nif` next to `config.nif`, so it outlives the session as well.
+(`defaults` puts back both lanes, so it backs up an edited `layout.nif` the
+same way, as `layout-backup.nif`.)
 That file is never overwritten -- the next backup is `config-backup2.nif`,
 then `config-backup3.nif` -- because the second theme switch of an afternoon
 must not be what loses the config the first one was protecting. Open one with

@@ -1,10 +1,7 @@
-## config.nim -- one NIF file describes a window: where its widgets go and what
-## they look like.
+## config.nim -- one NIF file says what a window looks like and who answers a
+## Ctrl+click in it.
 ##
 ##   (config
-##     (layout
-##       (editor)
-##       (status (lines 1)))
 ##     (theme
 ##       (bg "#15171B")
 ##       (fg "#E6DFD1"                        # every token class ...
@@ -13,6 +10,12 @@
 ##       (selBg "#35474B"))
 ##     (track
 ##       (compiler "nim")))
+##
+## Where the widgets *go* is not in here: `(layout ...)` is a file of its own,
+## parsed by `uirelays/layout`. The two were one file once, and that made the
+## window's shape a hostage of its colors -- picking a theme rewrote the
+## layout along with it, because the two arrived in the same text. A lane
+## each, and neither can spend the other.
 ##
 ## The tags inside `(theme ...)` are the field names of `Theme`, the tags
 ## inside `(fg ...)` are the values of `TokenClass` and the ones behind a color
@@ -33,10 +36,10 @@
 ## always be corrected -- it cannot lock the window it configures.
 
 import std/strutils
-import uirelays/[screen, layout, tinynif]
+import uirelays/[screen, tinynif]
 import theme
 
-export layout, theme
+export theme
 
 type
   Compiler* = enum
@@ -53,7 +56,6 @@ type
                      ## PATH like any other command
 
   Config* = object
-    layout*: Layout  ## empty when the file has no `(layout ...)`
     theme*: Theme    ## the fallback with whatever `(theme ...)` said applied
     track*: Track    ## what `(track ...)` said, or the default: `nim`
     error*: string   ## "line:col: why"; nothing in here can be used
@@ -395,8 +397,7 @@ proc parseTrack(p: var Parser; t: var Track) =
 
 proc parseConfig*(s: string; fallback = defaultTheme()): Config =
   ## Parse a `(config ...)`. Never raises: check `error`, then `note`.
-  result = Config(layout: default(Layout), theme: fallback,
-                  track: defaultTrack(), error: "", note: "")
+  result = Config(theme: fallback, track: defaultTrack(), error: "", note: "")
   var p = Parser(lex: initLexer(s), tok: Token(), error: "")
   p.advance
   if p.tok.kind == tkEof:
@@ -411,7 +412,6 @@ proc parseConfig*(s: string; fallback = defaultTheme()): Config =
     return
   p.advance
 
-  var laidOut = false
   var themed = false
   var tracked = false
   var t = fallback
@@ -419,14 +419,12 @@ proc parseConfig*(s: string; fallback = defaultTheme()): Config =
   while p.error.len == 0 and p.tok.kind == tkParLe:
     case p.tok.text
     of "layout":
-      if laidOut:
-        p.fail "only one (layout ...) per config"
-        break
-      laidOut = true
-      result.layout = parseLayout(p.lex, p.tok)
-      if result.layout.error.len > 0:
-        p.error = result.layout.error
-        break
+      # It was in here once. Say where it went rather than "does not belong":
+      # a config carried over from then is the likeliest way to arrive at this
+      # message, and it is one move away from working again.
+      p.fail "the layout has a file of its own now -- put (layout ...) in " &
+             "layout.nif, beside this one"
+      break
     of "theme":
       if themed:
         p.fail "only one (theme ...) per config"
@@ -441,7 +439,7 @@ proc parseConfig*(s: string; fallback = defaultTheme()): Config =
       p.parseTrack(tr)
     else:
       p.fail "'" & p.tok.text & "' does not belong in a config; expected " &
-             "(layout ...), (theme ...) or (track ...)"
+             "(theme ...) or (track ...)"
       break
 
   if p.error.len == 0 and p.tok.kind != tkParRi:
@@ -452,7 +450,6 @@ proc parseConfig*(s: string; fallback = defaultTheme()): Config =
       p.fail "unexpected " & $p.tok & " behind the config"
   if p.error.len > 0:
     result.error = p.error
-    result.layout = default(Layout)
     result.theme = fallback
     result.track = defaultTrack()
     return
