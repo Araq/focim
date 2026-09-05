@@ -192,11 +192,6 @@ jobs:
           cp "$exe" "$stage/$exe"
           cp README.md LICENSE "$stage/"
           cp doc/config.md "$stage/config.md"
-          # The shipped vocabulary, which the editor looks for in `data/` next
-          # to its binary -- without it `Ctrl+Space` starts out knowing only
-          # the words in the open buffers.
-          mkdir -p "$stage/data"
-          cp data/nimony.txt "$stage/data/"
 
           cat > "$stage/NIGHTLY.txt" <<EOF
           focim -- the Focussed Nim Editor, nightly build

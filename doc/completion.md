@@ -18,13 +18,12 @@ keys to work it, whichever question was asked.
 |--------|------|
 | The open buffers | Always, a couple of hundred lines per frame |
 | `index <path>` | Once; the result is stored and comes back on the next start |
-| `data/nimony.txt` | Shipped with the editor, loaded at startup |
+| The shipped vocabulary | Always: it is compiled into the editor |
 
-The shipped list is looked for in `data/nimony.txt` next to the binary and one
-directory above it -- the first is what a checkout looks like, where `nimble
-build` puts the binary beside `data/`, the second what an install looks like,
-where it sits in `bin/`. It is optional: without it the editor starts on the
-open buffers alone, and `index` fills the rest in.
+The shipped list is `data/nimony.txt` in the source tree, and the binary
+carries a copy of whatever it said when it was built -- so it is there however
+the editor was installed, and there is no file to lose. `tools/mkwordlist.nim`
+is what writes it, out of a checkout of the library it is a vocabulary of.
 
 A word is an identifier of at least two characters. A token that starts with a
 digit is not one, which is what keeps `0xffff` out. The word the caret is

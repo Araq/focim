@@ -269,8 +269,16 @@ const
   WordsDirName = "words"
     ## Under the config dir: one file per indexed path, so that `index` is
     ## paid for once and not on every start.
-  ShippedWords = "nimony.txt"
-    ## The vocabulary that comes with the editor, next to the binary.
+  ShippedWords = staticRead("../data/nimony.txt")
+    ## The vocabulary that comes with the editor -- in it, the way the icon
+    ## is. It was a file beside the binary and that is one thing too many to
+    ## get right: `nimble build` leaves the binary in the checkout, `nimble
+    ## install` puts it in a package directory, an archive is extracted
+    ## wherever, and a vocabulary that is missing is not an error anybody
+    ## sees -- completion simply knows less and nobody can tell why. Twelve
+    ## kilobytes in a binary that already carries eighty-six of icon settles
+    ## it. `data/nimony.txt` stays the source: `tools/mkwordlist.nim` writes
+    ## it, and what is compiled in is whatever it says at build time.
   MaxPreviewChars = 60
     ## How much of a line a tracking row quotes. A row is a thing to recognize
     ## a place by, not a place to read the code in.
@@ -898,11 +906,10 @@ proc loadWordSet(words: var WordIndex; file: string) =
 
 proc loadWordSets(words: var WordIndex) =
   ## The shipped vocabulary, then everything `index` stored in earlier runs.
-  for p in [getAppDir() / "data" / ShippedWords,
-            getAppDir().parentDir / "data" / ShippedWords]:
-    if fileExists(p):
-      loadWordSet(words, p)
-      break
+  block:
+    var ws = parseWordSet(ShippedWords)
+    if ws.name.len == 0: ws.name = "nimony"
+    words.addSet ws
   try:
     for kind, p in walkDir(configPath(WordsDirName)):
       if kind == pcFile and p.endsWith(".txt"):
