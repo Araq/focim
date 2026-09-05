@@ -1,3 +1,17 @@
+# A compiled Nim program has no extension on POSIX, which is what the first
+# three lines are for: everything without a dot is ignored, so the test
+# binaries and the editor itself stay out without being listed one by one.
+*
+!*/
+!*.*
+!LICENSE
 nimcache/
 nimblecache/
 htmldocs/
+testArtifacts/
+/focim
+/deps
+/nim.cfg
+nimble.develop
+nimble.paths
+nimbledeps

@@ -5,7 +5,7 @@
 
 import std/strutils
 import uirelays/screen  # Font, which SynEdit only draws with
-import widgets/[synedit, search]
+import focim/[synedit, search]
 
 var failures = 0
 

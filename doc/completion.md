@@ -9,7 +9,7 @@ Nothing here is semantic. There is no compiler in the loop and nothing knows
 that `add` is a proc or what its arguments are. What it knows is which names
 exist, which is enough to never have to type one twice. The one place a
 compiler *is* asked is `Ctrl+click`, which puts its answer in this same
-listing -- see `doc/focim/track.md`. One listing under the caret, one set of
+listing -- see `track.md`. One listing under the caret, one set of
 keys to work it, whichever question was asked.
 
 ## Where the words come from
@@ -21,8 +21,9 @@ keys to work it, whichever question was asked.
 | `data/nimony.txt` | Shipped with the editor, loaded at startup |
 
 The shipped list is looked for in `data/nimony.txt` next to the binary and one
-directory above it -- the second is what a checkout looks like, where the
-binary sits in `apps/`. It is optional: without it the editor starts on the
+directory above it -- the first is what a checkout looks like, where `nimble
+build` puts the binary beside `data/`, the second what an install looks like,
+where it sits in `bin/`. It is optional: without it the editor starts on the
 open buffers alone, and `index` fills the rest in.
 
 A word is an identifier of at least two characters. A token that starts with a

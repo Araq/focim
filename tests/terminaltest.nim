@@ -6,7 +6,7 @@
 ## window and starts no program.
 import uirelays/[screen, coords, input]
 import std/[os, strutils]
-import widgets/[synedit, terminal]
+import focim/[synedit, terminal]
 
 var clipboard = ""
 

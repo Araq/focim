@@ -25,7 +25,7 @@
 ## cannot be found and a query that matches nothing all end up in `note`.
 
 import std/[os, osproc, streams, strutils]
-import ../widgets/config
+import config
 
 export config.Compiler, config.Track, config.defaultTrack, config.exeName
 

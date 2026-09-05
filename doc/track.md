@@ -7,9 +7,9 @@ puts there -- with one row per place. `Up`/`Down` picks a row, `Enter` or `Tab`
 goes there, `Esc` drops it.
 
 ```
-def  src/widgets/synedit.nim:1877   proc gotoLine*(s: var SynEdit; line, col: int) =
-use  apps/focim.nim:704             tabs.ed.gotoLine(tabAct.line + 1, 0)
-use  apps/focim.nim:1683            tabs.ed.gotoLine(current + 1, 0)
+def  src/focim/synedit.nim:1877   proc gotoLine*(s: var SynEdit; line, col: int) =
+use  src/focim.nim:704            tabs.ed.gotoLine(tabAct.line + 1, 0)
+use  src/focim.nim:1683           tabs.ed.gotoLine(current + 1, 0)
 ```
 
 This is the one place in focim where a compiler is in the loop. `Ctrl+Space`

@@ -19,7 +19,7 @@
 
 from std/strutils import toLowerAscii
 import synedit
-from ../uirelays/screen import Color   ## what `mark` paints a hit with
+from uirelays/screen import Color   ## what `mark` paints a hit with
 
 export synedit
 

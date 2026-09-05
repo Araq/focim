@@ -7,7 +7,7 @@
 ## the test can simply read off.
 import std/random
 import uirelays/[screen, coords, input]
-import widgets/[synedit, theme]
+import focim/[synedit, theme]
 
 const BandColor = color(1, 2, 3)
 

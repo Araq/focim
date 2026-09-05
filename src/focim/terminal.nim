@@ -20,7 +20,7 @@ import synedit
 import ansi
 when defined(posix): import pty
 import filesearch
-import ../uirelays/[coords, screen, input]
+import uirelays/[coords, screen, input]
 
 export synedit
 # What tab completion leaves out of a listing is what a file search leaves out

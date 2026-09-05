@@ -1,3 +1,8 @@
+## The test suite. Every test here is a program that needs no window: the
+## drawing path is watched through stub relays, so what is checked is what the
+## editor decided, not what a driver painted. `nim c -r tests/tester.nim`, or
+## `nimble test`.
+
 import std/[os, strutils]
 
 proc fatal(msg: string) = quit "FAILURE " & msg
@@ -5,19 +10,7 @@ proc fatal(msg: string) = quit "FAILURE " & msg
 proc exec(cmd: string) =
   if execShellCmd(cmd) != 0: fatal cmd
 
-
-template execBackend(backend: string) =
-  for example in walkFiles("examples/*.nim"):
-    let command: string = [
-    "nim c",
-    "--outdir:testArtifacts", # give the bins their own folder so they don't pollute the src folder
-    backend,
-    example
-    ].join(" ")
-    exec command
-
-# The lexer and the config parsers need no driver, so they are tested directly.
-exec "nim c -r tests/tinyniftest.nim"
+# The config parser and the markdown one need no font, so they go first.
 exec "nim c -r tests/configtest.nim"
 exec "nim c -r tests/markdowntest.nim"
 # Bold and italics reach the drawing path through stub relays.
@@ -53,15 +46,7 @@ exec "nim c -r tests/ansitest.nim"
 # is a scroll nothing in the list itself ever asked for.
 exec "nim c -r tests/tablisttest.nim"
 
-# The app, once, with the platform's default backend.
-exec "nim c apps/focim.nim"
-
-execBackend("")
-when defined(features.uirelays.figDrawWindy):
-  execBackend("--define:\"features.uirelays.figDrawWindy\"")
-when defined(features.uirelays.figDrawSiwin):
-  execBackend("--define:\"features.uirelays.figDrawSiwin\"")
-when defined(linux):
-  execBackend("-d:gtk4")
-# execBackend("-d:sdl2")
-# execBackend("-d:sdl3")
+# The editor itself, once, with the platform's default backend -- the one
+# thing here that pulls in a driver, and so the one thing that would notice a
+# uirelays that moved on without focim.
+exec "nim c --outdir:testArtifacts --hints:off src/focim.nim"

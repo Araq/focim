@@ -52,8 +52,8 @@ relative to the directory the terminal is in; on the prompt, relative to the
 file being edited. A name that is not found as written is looked for in the
 directory of every open tab, then as an abbreviation of a file in one of them,
 and then in the *project* those directories are in -- so `o synedit` finds
-`src/widgets/synedit.nim`, and `o xelim.nim` finds `src/hexer/xelim.nim` with
-nothing but `nimony/README.md` open. See `doc/focim/open.md`. Ctrl+P is
+`src/focim/synedit.nim`, and `o xelim.nim` finds `src/hexer/xelim.nim` with
+nothing but `nimony/README.md` open. See `doc/open.md`. Ctrl+P is
 `open ` already typed into the prompt, for the muscle memory other editors
 have trained.
 
@@ -79,7 +79,7 @@ what the terminal is for.
 `find`, `findall`, `next`, `prev`, `replace` and `replaceall` are the same idea
 applied to searching: no dialog, one line of text, and every match highlighted
 in place -- in the other open tabs as well. Ctrl+F, F3 and Shift+F3 are there
-for the fingers that expect them. See `doc/focim/search.md`.
+for the fingers that expect them. See `doc/search.md`.
 
 A command that has to ask something -- overwriting a file, replacing a match --
 puts the question in the status bar and moves the caret there: the next line
@@ -117,28 +117,28 @@ leaving the editor.
 Ctrl+Space completes a word. There is no compiler in the loop and nothing
 here knows what a name *means*; what it knows is which names exist -- in the
 open buffers, in a directory that `index <path>` was pointed at, and in the
-Nimony vocabulary that ships with the editor. See `doc/focim/completion.md`.
+Nimony vocabulary that ships with the editor. See `doc/completion.md`.
 
 Ctrl+click on a name in a `.nim` file is the one place a compiler *is* in the
 loop: `nim track` (or nimony) is asked where the name is declared and where it
 is used, and the answer comes back as the same listing Ctrl+Space uses -- one
 row per place, Enter to go there. The compiler runs in a thread, so the window
 stays a window while it thinks. `(track (compiler "nim"))` in the config says
-which compiler, and `"none"` says nobody. See `doc/focim/track.md`.
+which compiler, and `"none"` says nobody. See `doc/track.md`.
 
 The `clipboard` cell keeps what the clipboard held. A system clipboard holds
 one thing, so copying twice before pasting once loses the first -- here the
 last thirty texts that entered it stay, from this application or from any
 other, numbered, and Ctrl+1 .. Ctrl+9 paste one at the caret. See
-`doc/focim/clipboard.md`.
+`doc/clipboard.md`.
 
 Icon: `focim-icon.png` is the source art, and the files built from it that are
 checked in next to it -- `focim-icon.netwm` for X11, `focim.ico` / `.rc` /
 `.res` for Windows. Deriving those from the PNG, and installing the desktop
 entry or the `.app` bundle, is somebody else's job: `iconbundler`
 (https://github.com/Araq/iconbundler), which is a tool for any desktop
-application and does not belong in a UI library. After changing the PNG, from
-`apps/`:
+application and does not belong in an editor. After changing the PNG, from
+`src/`:
 
     iconbundler --prepare focim
 
@@ -159,10 +159,10 @@ from std/strutils import toLowerAscii, strip, endsWith, contains, splitLines,
 from std/cmdline import paramCount, paramStr
 import uirelays
 import uirelays/layout
-import widgets/[synedit, terminal, config, wordindex, cliphistory, search,
-                filesearch]
+import focim/[synedit, terminal, config, wordindex, cliphistory, search,
+              filesearch]
 import focim/track
-import completion
+import focim/completion
 
 # Derived from focim-icon.png by `iconbundler --prepare focim`.
 when defined(windows):
@@ -196,7 +196,7 @@ const defaultConfig = """
         (history (lines 5))
         (terminal)))
     (status (lines 1)))
-  # Anything left out keeps the color it has; `doc/focim/config.md` lists
+  # Anything left out keeps the color it has; `doc/config.md` lists
   # the fields.
   # Every token class is written out below, so any of them can be recolored by
   # editing the line rather than by first finding out that the class exists.

@@ -3,7 +3,7 @@
 
 import std/[tables, strutils]
 import uirelays/screen  # Color, which config only passes through
-import widgets/config
+import focim/config
 
 var failures = 0
 

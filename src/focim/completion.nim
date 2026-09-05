@@ -1,15 +1,13 @@
 ## completion.nim -- the listing of words that could continue what is being
 ## typed, drawn under the caret of the editor it completes.
 ##
-## It lives next to focim rather than under `widgets/` because it is not a
-## general purpose widget yet: it knows that its candidates come out of a
-## `WordIndex`, that what it points at is a SynEdit with a caret in it, and
-## that the word being completed is the one the caret sits behind. A widget
-## would take a `seq[string]` and a rectangle and let its host answer all
-## three. That is a small change and the day something else wants a listing
-## under a caret is the day to make it -- until then this is one app's screen
-## furniture, and pretending otherwise would only fix the wrong shape in
-## place.
+## It is one app's screen furniture and not a general purpose widget: it knows
+## that its candidates come out of a `WordIndex`, that what it points at is a
+## SynEdit with a caret in it, and that the word being completed is the one the
+## caret sits behind. A widget would take a `seq[string]` and a rectangle and
+## let its host answer all three. That is a small change and the day something
+## else wants a listing under a caret is the day to make it -- until then
+## pretending otherwise would only fix the wrong shape in place.
 ##
 ## Nothing is ever typed *into* it. The caret stays in the editor, so an
 ## ordinary keystroke narrows the listing rather than leaving it: the host
@@ -26,7 +24,7 @@
 ## rather than the listing writing it into the buffer.
 
 import uirelays
-import widgets/[synedit, wordindex]
+import synedit, wordindex
 
 const
   MaxRows* = 10

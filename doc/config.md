@@ -83,7 +83,7 @@ stretching boxes, never off a `px` or `lines` one.
 
 The tags inside `(theme ...)` are the field names of `Theme` and the tags
 inside `(fg ...)` are the values of `TokenClass`, both spelled exactly as they
-appear in `widgets/theme.nim`. There is nothing to look up and nothing that
+appear in `focim/theme.nim`. There is nothing to look up and nothing that
 can fall out of sync when a field is added.
 
 ```
@@ -164,7 +164,7 @@ anyone means to say.
 # Tracking
 
 `(track ...)` says who answers "where is this name?" when a `.nim` file is
-Ctrl+clicked, and what to run them by. See `doc/focim/track.md` for what the
+Ctrl+clicked, and what to run them by. See `track.md` for what the
 answer looks like.
 
 ```

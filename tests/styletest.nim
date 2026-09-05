@@ -4,7 +4,7 @@
 ## window and no driver.
 import std/tables
 import uirelays/[screen, coords, input]
-import widgets/[synedit, theme]
+import focim/[synedit, theme]
 
 var
   nextHandle = 0

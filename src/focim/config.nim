@@ -32,7 +32,7 @@
 ## `note` says so while `theme` falls back. That way a config typed by hand can
 ## always be corrected -- it cannot lock the window it configures.
 
-import ../uirelays/[screen, layout, tinynif]
+import uirelays/[screen, layout, tinynif]
 import theme
 
 export layout, theme

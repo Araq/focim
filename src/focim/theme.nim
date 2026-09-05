@@ -2,7 +2,7 @@
 ##
 ## Since everything is text (SynEdit), there is one theme type.
 
-import ../uirelays/screen
+import uirelays/screen
 
 type
   TokenClass* {.pure.} = enum

@@ -41,7 +41,7 @@
 ##   let act = tabs.draw(e, area, focused)
 ##   if act.kind == closeLine: tabs.gotoLine(act.line + 1, 0); tabs.deleteLine()
 
-import ../uirelays/[coords, screen, input]
+import uirelays/[coords, screen, input]
 import ./theme
 import ./langs/markdown
 import std/strutils

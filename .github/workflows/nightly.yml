@@ -1,11 +1,11 @@
 name: focim nightly builds
 
-# Builds apps/focim -- the Focussed Nim Editor -- on a matrix of platforms and
+# Builds focim -- the Focussed Nim Editor -- on a matrix of platforms and
 # publishes the binaries to this repo's GitHub Releases. Each run creates one
 # versioned release per commit (tag `nightly-<version>-<commit>`, version from
-# uirelays.nimble), so download URLs pin an exact revision. The library's own
-# build-and-test matrix lives in ci.yml and is intentionally kept separate:
-# this workflow ships a binary, that one checks the code.
+# focim.nimble), so download URLs pin an exact revision. The test matrix lives
+# in ci.yml and is intentionally kept separate: this workflow ships a binary,
+# that one checks the code.
 
 on:
   workflow_dispatch: {}
@@ -66,9 +66,9 @@ jobs:
 
           # The canonical version is the nimble file's, the same one `nimble
           # install` reports.
-          version=$(grep -m1 '^version' uirelays.nimble | cut -d'"' -f2)
+          version=$(grep -m1 '^version' focim.nimble | cut -d'"' -f2)
           if [ -z "$version" ]; then
-            echo "Could not read version from uirelays.nimble" >&2
+            echo "Could not read version from focim.nimble" >&2
             exit 1
           fi
 
@@ -110,7 +110,7 @@ jobs:
               --repo "$GITHUB_REPOSITORY" \
               --title "focim ${{ steps.decide.outputs.version }} nightly (${{ steps.decide.outputs.date }})" \
               --prerelease \
-              --notes "Nightly build of apps/focim @ ${{ steps.decide.outputs.commit }} (version ${{ steps.decide.outputs.version }}, ${{ steps.decide.outputs.date }})."
+              --notes "Nightly build of focim @ ${{ steps.decide.outputs.commit }} (version ${{ steps.decide.outputs.version }}, ${{ steps.decide.outputs.date }})."
           fi
 
   # ── Build + package focim per platform ─────────────────────────────────────
@@ -161,12 +161,19 @@ jobs:
       - name: Nim version
         run: nim --version
 
+      - name: Install uirelays
+        # The UI library focim is written with. Not on the Nimble package
+        # list, so it is installed by URL -- the same dependency
+        # `focim.nimble` declares.
+        shell: bash
+        run: nimble install -y https://github.com/nim-lang/uirelays
+
       - name: Build focim
         shell: bash
         run: |
           set -euo pipefail
-          # apps/nim.cfg supplies --path:../src, so this works from the root.
-          nim c -d:release --hints:off apps/focim.nim
+          # `--outdir:.` puts the binary where `nimble build` would.
+          nim c -d:release --hints:off --outdir:. src/focim.nim
 
       - name: Stage the package
         shell: bash
@@ -176,13 +183,18 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then exe=focim.exe; fi
           stage=staging/focim
           mkdir -p "$stage"
-          cp "apps/$exe" "$stage/$exe"
-          cp README.md LICENSE.md "$stage/"
-          cp doc/focim/config.md "$stage/config.md"
+          cp "$exe" "$stage/$exe"
+          cp README.md LICENSE "$stage/"
+          cp doc/config.md "$stage/config.md"
+          # The shipped vocabulary, which the editor looks for in `data/` next
+          # to its binary -- without it `Ctrl+Space` starts out knowing only
+          # the words in the open buffers.
+          mkdir -p "$stage/data"
+          cp data/nimony.txt "$stage/data/"
 
           cat > "$stage/NIGHTLY.txt" <<EOF
           focim -- the Focussed Nim Editor, nightly build
-          uirelays-commit: ${{ needs.prepare.outputs.commit }}
+          commit:          ${{ needs.prepare.outputs.commit }}
           version:         ${{ needs.prepare.outputs.version }}
           date:            ${{ needs.prepare.outputs.date }}
           platform:        ${{ matrix.os }}_${{ matrix.cpu }}
@@ -282,8 +294,8 @@ jobs:
           # what it derives next to the source PNG, and the working tree is
           # not the place for that.
           work=$(mktemp -d)
-          cp apps/focim-icon.png "$work/"
-          iconbundler focim apps/focim "$work/focim-icon.png" \
+          cp src/focim-icon.png "$work/"
+          iconbundler focim ./focim "$work/focim-icon.png" \
             --name focim --comment 'Focussed Nim Editor' \
             --bundle-id org.nim-lang.focim \
             --out staging/focim/focim.app
@@ -317,7 +329,7 @@ jobs:
           # supposed to carry over, byte for byte, not a guess about one.
           "$py" - <<'PY'
           import struct, sys
-          ico = open('apps/focim.ico', 'rb').read()
+          ico = open('src/focim.ico', 'rb').read()
           n = struct.unpack('<H', ico[4:6])[0]
           *_, size, off = struct.unpack('<BBBBHHII', ico[6+(n-1)*16 : 6+n*16])
           frame = ico[off:off+size]
@@ -387,7 +399,7 @@ jobs:
           set -euo pipefail
           notes=$(cat <<EOF
           focim -- the Focussed Nim Editor.
-          Built from uirelays @ ${{ needs.prepare.outputs.commit }}
+          Built from ${{ needs.prepare.outputs.commit }}
           version ${V} · ${{ needs.prepare.outputs.date }}
 
           Downloads:

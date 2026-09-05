@@ -7,7 +7,7 @@
 ## the caret along with it. Nothing here draws, so no window is needed.
 import std/strutils
 import uirelays/[screen, coords, input]
-import widgets/[synedit, theme]
+import focim/[synedit, theme]
 
 fontRelays = FontRelays(
   openFont: proc (path: string; size: int; style: FontStyles;

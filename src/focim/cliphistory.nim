@@ -22,7 +22,7 @@
 import std/monotimes
 import std/times except Time
 import synedit
-import ../uirelays/[coords, screen, input]
+import uirelays/[coords, screen, input]
 
 const
   MaxEntries* = 30

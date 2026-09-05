@@ -17,7 +17,7 @@
 ## line in a listing; parsing Nim to avoid it would cost a compiler.
 
 import std/os
-import ../src/widgets/wordindex
+import ../src/focim/wordindex
 
 const Keywords = [
   "addr", "and", "as", "asm", "bind", "block", "break", "case", "cast",

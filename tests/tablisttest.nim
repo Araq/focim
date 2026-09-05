@@ -6,7 +6,7 @@
 ## the list, and that drawing the widget afterwards leaves it where it was,
 ## focused or not.
 import uirelays/[screen, coords, input]
-import widgets/[synedit, theme]
+import focim/[synedit, theme]
 
 fontRelays = FontRelays(
   openFont: proc (path: string; size: int; style: FontStyles;

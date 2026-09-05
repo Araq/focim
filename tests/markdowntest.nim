@@ -1,6 +1,6 @@
 ## Markdown helpers that need no window -- link hit-testing and heading slugs.
 
-import ../src/widgets/langs/markdown
+import focim/langs/markdown
 
 template check(cond: bool; msg: string) =
   if not cond: quit "FAILURE " & msg

@@ -4,7 +4,7 @@
 ## draws and nothing is read.
 
 import std/[os, strutils]
-import widgets/filesearch
+import focim/filesearch
 
 var failures = 0
 

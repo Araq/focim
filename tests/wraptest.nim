@@ -5,7 +5,7 @@
 ## where is arithmetic rather than a screenshot.
 import std/[strutils, sequtils]
 import uirelays/[screen, coords, input]
-import widgets/[synedit, theme]
+import focim/[synedit, theme]
 
 const
   GlyphW = 8

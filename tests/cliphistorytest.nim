@@ -5,7 +5,7 @@
 import std/strutils
 import uirelays/screen  # Font, which SynEdit only draws with
 import uirelays/input   # clipboardRelays, which this test stands in for
-import widgets/cliphistory
+import focim/cliphistory
 
 var failures = 0
 

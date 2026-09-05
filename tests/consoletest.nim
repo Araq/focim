@@ -3,7 +3,7 @@
 ## colors, so this needs no window and no font.
 
 import uirelays/screen        # Font, which SynEdit only draws with
-import widgets/[synedit, theme]
+import focim/[synedit, theme]
 
 var failures = 0
 
@@ -84,7 +84,7 @@ block: # compiler output
          "Green")
   equals("the tag at the end is a rule",
          classOf("x.nim(1, 1) Hint: used [Conf]", "[Conf]"), "Rule")
-  equals("a path stays one token", classOf("cat src/widgets/synedit.nim", "src/widgets/synedit.nim"),
+  equals("a path stays one token", classOf("cat src/focim/synedit.nim", "src/focim/synedit.nim"),
          "Identifier")
 
 block: # what must not happen

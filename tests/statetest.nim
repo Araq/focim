@@ -2,7 +2,7 @@
 ## file the app writes and nobody edits. Needs no window.
 
 import std/[tables, strutils]
-import widgets/state
+import focim/state
 
 var failures = 0
 

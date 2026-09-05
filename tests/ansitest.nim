@@ -6,7 +6,7 @@
 ## into a SynEdit runs through the same stub relays as `styletest`.
 import std/strutils
 import uirelays/[screen, coords, input]
-import widgets/[ansi, synedit, theme]
+import focim/[ansi, synedit, theme]
 
 fontRelays = FontRelays(
   openFont: proc (path: string; size: int; style: FontStyles;
