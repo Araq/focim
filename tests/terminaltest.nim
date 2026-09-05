@@ -192,6 +192,31 @@ block: # the prompt follows the branch, not only the directory
         t.allText.contains("[0123456]"), t.allText)
   removeDir repo
 
+block: # the prompt's own commands, which a terminal leaves to the programs
+  proc ran(t: var Terminal; line: string): TermAction =
+    var cmd = line
+    result = t.runCommand(cmd)
+
+  var p = createTerminal(font)
+  p.isPrompt = true
+  p.insertPrompt()
+  var a = p.ran("theme mocha")
+  check("`theme <name>` picks a theme",
+        a.kind == selectTheme and a.name == "mocha", $a.kind)
+  a = p.ran("theme")
+  check("`theme` on its own asks what there is to pick",
+        a.kind == selectTheme and a.name.len == 0, $a.kind)
+  a = p.ran("Theme MOCHA")
+  check("neither half of it is case sensitive",
+        a.kind == selectTheme and a.name == "mocha", $a.kind)
+  a = p.ran("defaults")
+  check("`defaults` is the prompt's as well", a.kind == resetConfig, $a.kind)
+
+  var t = newTerm()
+  a = t.ran("theme mocha")
+  check("in a terminal the word belongs to a program of that name",
+        a.kind == noAction and t.processRunning, $a.kind)
+
 block: # what marks the cached branch stale
   check("`cd` is seen as a word", mentionsCd("mkdir x && cd x"))
   check("and not inside one", not mentionsCd("abcd") and not mentionsCd("cdrom"))

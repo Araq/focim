@@ -1,5 +1,6 @@
-## Tests for `(config ...)`: the layout and the theme in one file, and the
-## refusal of a theme nobody could read. Needs no window.
+## Tests for `(config ...)`: the theme and the tracking, the refusal of a theme
+## nobody could read, and the layout's absence -- it has a file of its own, and
+## a config that still carries one is told where it went. Needs no window.
 
 import std/[tables, strutils]
 import uirelays/screen  # Color, which config only passes through
@@ -31,9 +32,6 @@ echo "config:"
 block:
   let c = parsed("""
 (config
-  (layout
-    (editor (stretch 3))
-    (status (lines 1)))
   (theme
     (bg "#1E1E2E")
     (fg "#CDD6F4"
@@ -41,9 +39,6 @@ block:
       (Comment "#6C7086"))
     (selBg "#585b70")))
 """)
-  let cells = c.layout.resolve(100, 100, lineHeight = 10, padding = 0)
-  check("the layout came through", "editor" in cells and "status" in cells,
-        $cells.len & " cells")
   equals("a scalar color", $c.theme.bg, "30,30,46")
   equals("the fg base", $c.theme.fg[TokenClass.Identifier], "205,214,244")
   equals("a token class override", $c.theme.fg[TokenClass.Keyword],
@@ -64,35 +59,15 @@ block:
   equals("and all three are readable", c.note, "")
 
 block:
-  # A `(px N)` is logical, so the same config has to describe the same window
-  # on a display of any density: at 200% the sidebar takes twice the pixels
-  # and the editor keeps whatever that leaves.
-  let c = parsed("(config (layout (cols (sidebar (px 30)) (editor))))")
-  let normal = c.layout.resolve(100, 100, lineHeight = 10, padding = 0)
-  let dense = c.layout.resolve(100, 100, lineHeight = 10, padding = 0,
-                               uiScale = 200)
-  equals("a px size is logical", $normal["sidebar"].w & " -> " & $dense["sidebar"].w,
-         "30 -> 60")
-  equals("and the stretching neighbour gives way",
-         $normal["editor"].w & " -> " & $dense["editor"].w, "70 -> 40")
-  equals("the dense sidebar still starts at the left edge",
-         $dense["sidebar"].x & "," & $dense["editor"].x, "0,60")
+  let c = parsed("(config (theme (bg \"#14141E\")) (track (compiler \"none\")))")
+  equals("a theme and a track in one file", $c.theme.bg, "20,20,30")
+  equals("and both took effect", $c.track.compiler, "none")
 
 block:
-  let c = parsed("(config (theme (bg \"#14141E\")) (layout (editor)))")
-  check("theme before layout", c.layout.cell("editor"))
-  equals("and both took effect", $c.theme.bg, "20,20,30")
-
-block:
-  let c = parsed("(config (layout (editor)))")
+  let c = parsed("(config (track (compiler \"nim\")))")
   let d = defaultTheme()
   equals("a config without a theme keeps the fallback", $c.theme.bg, $d.bg)
   equals("all of it", $c.theme.fg[TokenClass.Keyword], $d.fg[TokenClass.Keyword])
-
-block:
-  let c = parsed("(config (theme (bg \"#1E1E2E\")))")
-  check("a config without a layout is empty, not broken",
-        c.layout.resolve(100, 100).len == 0)
 
 block:
   var base = defaultTheme()
@@ -145,10 +120,10 @@ block:
 block:
   let c = parsed("""
 (config          # a comment
-  (layout (editor))   # and another
+  (track (compiler "none"))   # and another
   (theme (bg "#1E1E2E")))
 """)
-  check("comments are allowed throughout", c.layout.cell("editor"))
+  check("comments are allowed throughout", c.error.len == 0, c.error)
   equals("and change nothing", $c.theme.bg, "30,30,46")
 
 # ---------------------------------------------------------------------------
@@ -173,8 +148,8 @@ check("catppuccinMocha still does too",
 
 block:
   # Near-black text on a near-black background: the case the check exists for.
-  let c = parsed("(config (layout (editor)) (theme (bg \"#000000\") " &
-                 "(fg \"#141414\")))")
+  let c = parsed("(config (track (compiler \"nimony\")) (theme " &
+                 "(bg \"#000000\") (fg \"#141414\")))")
   check("an unreadable theme is refused", c.note.len > 0)
   check("with the sentence the status bar wants",
         c.note.startsWith("too low contrast between colors, used default " &
@@ -182,8 +157,8 @@ block:
   check("and it says which color", c.note.contains(":1 against the background"),
         c.note)
   equals("the theme is the fallback", $c.theme.bg, $defaultTheme().bg)
-  check("the layout is kept -- only the colors were refused",
-        c.layout.cell("editor"))
+  equals("the rest of the file is kept -- only the colors were refused",
+         $c.track.compiler, "nimony")
   equals("this is a note, not an error", c.error, "")
 
 block:
@@ -268,8 +243,12 @@ rejects("the empty string", "(config (theme (bg \"\")))", "a color is")
 rejects("a '#' on its own", "(config (theme (bg \"#\")))", "a color is")
 rejects("two colors in one field",
         "(config (theme (bg \"#1E1E2E\" \"#112233\")))", "expected ')'")
-rejects("two layouts", "(config (layout (a)) (layout (b)))",
-        "only one (layout ...)")
+# The layout moved out, and a config carried over from when it had not is the
+# likeliest way anyone meets this message -- so it says where to put the block
+# rather than that it does not belong.
+rejects("a layout in a config", "(config (layout (editor)))",
+        "layout has a file of its own now")
+rejects("and it names the file", "(config (layout (editor)))", "layout.nif")
 rejects("two themes",
         "(config (theme (bg \"#010101\")) (theme (bg \"#020202\")))",
         "only one (theme ...)")
@@ -277,11 +256,10 @@ rejects("a tag that belongs nowhere", "(config (style (bg \"#010203\")))",
         "does not belong in a config")
 rejects("a bare layout", "(layout (a))", "expected (config ...)")
 rejects("nothing at all", "", "nothing here")
-rejects("an unclosed config", "(config (layout (a))", "expected ')'")
-rejects("something behind the config", "(config (layout (a))) (config)",
+rejects("an unclosed config", "(config (theme (bg \"#010203\"))",
+        "expected ')'")
+rejects("something behind the config", "(config) (config)",
         "behind the config")
-rejects("a layout error is passed along", "(config (layout (grid (a))))",
-        "names a widget")
 rejects("a lexer error is passed along",
         "(config (theme (bg \"1E1E2E)))", "unterminated string")
 rejects("an unknown style",
@@ -303,9 +281,84 @@ rejects("a style where a token class belongs",
 block:
   # A config that did not parse hands back nothing usable, so a caller that
   # ignores `error` cannot draw a half-applied window.
-  let bad = parseConfig("(config (theme (bgg \"#010203\")) (layout (editor)))")
-  check("a broken config has no layout", bad.layout.resolve(100, 100).len == 0)
-  equals("and the fallback theme", $bad.theme.bg, $defaultTheme().bg)
+  let bad = parseConfig("(config (track (compiler \"none\")) " &
+                        "(theme (bgg \"#010203\")))")
+  equals("a broken config keeps none of its track", $bad.track.compiler, "nim")
+  equals("and has the fallback theme", $bad.theme.bg, $defaultTheme().bg)
+
+# ---------------------------------------------------------------------------
+echo "themes:"
+# ---------------------------------------------------------------------------
+
+proc sameTheme(a, b: Theme): string =
+  ## "" when the two themes are the same one, otherwise the first field that
+  ## says they are not. Written out field by field on purpose: a `==` would
+  ## stop saying anything the day `Theme` grows a field, and this is the test
+  ## that a written theme carries *everything*.
+  for tc in low(TokenClass)..high(TokenClass):
+    if a.fg[tc] != b.fg[tc]:
+      return $tc & " is " & $a.fg[tc] & " not " & $b.fg[tc]
+    if a.style[tc] != b.style[tc]:
+      return $tc & " is styled " & $a.style[tc] & " not " & $b.style[tc]
+  let fields = [("bg", a.bg, b.bg), ("panelBg", a.panelBg, b.panelBg),
+                ("selBg", a.selBg, b.selBg),
+                ("bracketBg", a.bracketBg, b.bracketBg),
+                ("cursorColor", a.cursorColor, b.cursorColor),
+                ("lineNumColor", a.lineNumColor, b.lineNumColor),
+                ("markerBg", a.markerBg, b.markerBg),
+                ("scrollBarColor", a.scrollBarColor, b.scrollBarColor),
+                ("scrollBarActiveColor", a.scrollBarActiveColor,
+                 b.scrollBarActiveColor),
+                ("scrollTrackColor", a.scrollTrackColor, b.scrollTrackColor),
+                ("activeLineBg", a.activeLineBg, b.activeLineBg),
+                ("actionColor", a.actionColor, b.actionColor),
+                ("closeColor", a.closeColor, b.closeColor),
+                ("focusColor", a.focusColor, b.focusColor)]
+  for f in fields:
+    if f[1] != f[2]: return f[0] & " is " & $f[1] & " not " & $f[2]
+  result = ""
+
+for it in ShippedThemes:
+  var t = default(Theme)
+  check(it.name & " is a theme this build has", findTheme(it.name, t))
+  # Every shipped theme is one its own contrast check would let a user keep.
+  equals(it.name & " can be read", contrastProblem(t), "")
+  # And what it looks like as text is what it is: write it, parse it back, and
+  # nothing has moved. The fallback is deliberately *another* shipped theme --
+  # a field the writer forgot would come back as that one's color instead of
+  # as a default that happens to match.
+  let other = if it.name == "mocha": goldenDusk() else: catppuccinMocha()
+  let c = parseConfig("(config\n" & themeText(t) & ")\n", fallback = other)
+  check(it.name & " is a config file", c.error.len == 0, c.error)
+  equals(it.name & " is accepted as it is written", c.note, "")
+  equals(it.name & " round trips through the config syntax",
+         sameTheme(c.theme, t), "")
+
+block:
+  # A theme is written out whole, so it cannot be read as a coat of paint over
+  # the theme it replaces: nothing of the fallback survives it.
+  var paper = default(Theme)
+  doAssert findTheme("paper", paper)
+  let c = parseConfig("(config\n" & themeText(paper) & ")",
+                      fallback = goldenDusk())
+  equals("a written theme replaces the fallback entirely",
+         sameTheme(c.theme, paper), "")
+  check("down to the colors only a terminal asks for",
+        c.theme.fg[TokenClass.BrightCyan] != goldenDusk().fg[TokenClass.BrightCyan])
+
+block:
+  var t = catppuccinMocha()
+  check("a name nobody ships is refused", not findTheme("solarized", t))
+  equals("and the theme is left alone", sameTheme(t, catppuccinMocha()), "")
+  equals("the names are there to be listed", themeNames(), "dusk, mocha, paper")
+
+block:
+  # The indentation is the caller's: a theme written into a config file sits
+  # two spaces in, and one written on its own sits at the margin.
+  let t = goldenDusk()
+  check("indent 0 starts at the margin", themeText(t, 0).startsWith("(theme"))
+  check("indent 2 is the config file's", themeText(t, 2).startsWith("  (theme"))
+  check("and neither ends in a newline", not themeText(t).endsWith("\n"))
 
 echo(if failures == 0: "ALL PASS" else: $failures & " FAILURE(S)")
 if failures > 0: quit 1

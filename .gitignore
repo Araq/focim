@@ -11,6 +11,9 @@ htmldocs/
 testArtifacts/
 staging/
 /focim
+# `nim c src/focim.nim` cannot write `src/focim` -- the directory of that
+# name is already there -- so Nim writes `src/focim.out` instead, dot and all.
+/src/focim.out
 /deps
 /nim.cfg
 nimble.develop

@@ -12,6 +12,9 @@ proc exec(cmd: string) =
 
 # The config parser and the markdown one need no font, so they go first.
 exec "nim c -r tests/configtest.nim"
+# And the directory that config is kept in, which needs no font either -- it
+# points the config dir at a temporary one, so it touches nothing of yours.
+exec "nim c -r tests/configstoretest.nim"
 exec "nim c -r tests/markdowntest.nim"
 # Bold and italics reach the drawing path through stub relays.
 exec "nim c -r tests/styletest.nim"
@@ -45,6 +48,11 @@ exec "nim c -r tests/ansitest.nim"
 # And that the tab list goes and shows the tab the editor made current, which
 # is a scroll nothing in the list itself ever asked for.
 exec "nim c -r tests/tablisttest.nim"
+# Two panels on one buffer: that neither shows anything of the other, and that
+# a caret is carried along by an edit made through the other one.
+exec "nim c -r tests/viewtest.nim"
+# The names panels go by, and the list of them the layout dictates.
+exec "nim c -r tests/panelstest.nim"
 
 # The editor itself, once, with the platform's default backend -- the one
 # thing here that pulls in a driver, and so the one thing that would notice a

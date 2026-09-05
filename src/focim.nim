@@ -30,19 +30,37 @@ each with its own *flipped* edit semantics:
   back to: `[Editor]` for the directory of the file in the editor,
   `[Terminal]` for the one the terminal is in.
 
-The same idea applied to the window itself: tab 0 is `[config]`, and its text
-IS the NIF `(config ...)` this app is built from -- the `(layout ...)` that
-places the widgets and the `(theme ...)` that colors them. Editing it
-relayouts and recolors the window on the next frame, so there is no separate
-settings dialog either. Leaving a widget out of the layout hides it without
-destroying it -- its buffer, cursor and scroll position are still there when a
-later layout lists it again. Only the `editor` cell has to stay, since it is
-where the config gets typed. A config that does not parse is reported in the
-status bar, with the line and column of the mistake, and ignored, so the last
-good one keeps the window usable; a theme whose text would be unreadable on
-its own background is refused the same way. Every color in it is written as
-`"#RRGGBB"`, which SynEdit draws a chip of, so the palette is visible while it
-is being edited.
+The same idea applied to the window itself: tabs 0 and 1 are `[config]` and
+`[layout]`, and their text IS the NIF this app is built from -- the
+`(config ...)` whose `(theme ...)` colors the widgets, and the `(layout ...)`
+that places them. Editing one recolors the window on the next frame and
+editing the other relayouts it, so there is no separate settings dialog
+either. Two lanes rather than one file because they answer different questions
+and change on different days: the colors are picked once, the panels are
+shoved about all the time, and a theme that arrived in the same text as the
+layout could not be replaced without replacing the layout with it.
+
+The layout is also the one of the two the mouse writes. The gaps between the
+panels are the borders, and a border is a grip: press the left button on one
+and it follows the pointer, moving the two boxes on either side of it and
+leaving everything else in that container the size it was. The release writes
+the new sizes into `[layout]` as a single edit -- so `Ctrl+Z` there undoes a
+drag, and the file is stored by the same machinery that stores a layout typed
+by hand. Each box keeps the unit it was written in: a `(px N)` follows the
+pointer to the pixel, a `(lines N)` snaps to whole lines, and the boxes that
+share what is left over have their weights rewritten from the pixels they now
+have. Which is why the layout has a file to itself: it is the settings the
+mouse edits, and it must not be replaced by anything that has an opinion about
+color.
+
+Leaving a widget out of the layout hides it without destroying it -- its
+buffer, cursor and scroll position are still there when a later layout lists
+it again. Only the `editor` cell has to stay, since it is where the layout
+gets typed. A lane that does not parse is reported in the status bar, with the
+line and column of the mistake, and ignored, so the last good one keeps the
+window usable; a theme whose text would be unreadable on its own background is
+refused the same way. Every color is written as `"#RRGGBB"`, which SynEdit
+draws a chip of, so the palette is visible while it is being edited.
 
 Both the terminal and the status bar take commands, and some of them act on the
 buffer rather than on the machine: `o <file>` / `open <file>` opens one, `s` /
@@ -69,12 +87,22 @@ bytes -- a `touch`, a checkout that put the same text back -- is not a change
 and is not mentioned. The explorer relists itself the same way, keeping the
 filter that is typed in it and the place it is scrolled to.
 
-`defaults`, in the prompt, puts the config the app ships with back into the
-`[config]` tab -- for a config that has been edited into a corner: a flattened
-palette, a layout with the panel one is looking for left out of it. It is an
-edit like any other, so `Ctrl+Z` in that tab brings the old config back. Only
-the prompt understands the word; in the terminal it names a program, which is
-what the terminal is for.
+`defaults`, in the prompt, puts what the app ships with back into both lanes
+-- for settings that have been edited into a corner: a flattened palette, a
+layout with the panel one is looking for left out of it. It is an edit like
+any other, so `Ctrl+Z` in either tab brings the old text back. Only the prompt
+understands the word; in the terminal it names a program, which is what the
+terminal is for.
+
+`theme` is the same door with more than one thing behind it: three configs
+ship with the editor, `theme` lists them and `theme paper` puts one in the
+tab. A theme is that whole lane rather than a palette spliced into the text
+that is there -- it is written out of a `Theme` object, every field and every
+token class, so nothing of the theme it replaces is left standing. What it
+replaces is not lost either: `Ctrl+Z` has it for the session, and a config
+that had been edited by hand goes to `config-backup.nif` beside `config.nif`
+before the edit is made. `[layout]` is not touched by any of it. See
+`doc/config.md`.
 
 `find`, `findall`, `next`, `prev`, `replace` and `replaceall` are the same idea
 applied to searching: no dialog, one line of text, and every match highlighted
@@ -106,8 +134,13 @@ caret keys above it; Ctrl+C copies while something is selected and stops the
 running program when nothing is. A program that prints while its output is
 being read leaves both the caret and the scroll position alone.
 
-The config and the list of open tabs are stored under `getConfigDir()` in
-`focim/config.nif` and `focim/tabs.txt`, so both survive a restart.
+The settings and the list of open tabs are stored under `getConfigDir()` in
+`focim/layout.nif`, `focim/config.nif` and `focim/tabs.txt`, so all of it
+survives a restart. The two `.nif` files are the `[layout]` and `[config]`
+tabs, and each is written back whenever the tab it belongs to parses. They
+were one file once; a config that still has a `(layout ...)` in it has that
+block moved across on the first start, and keeps a copy of itself while that
+happens.
 
 Markdown is still SynEdit, not a browser pane. Headings, links and fenced
 code light up in place; Cmd/Ctrl+click on a `[label](path)` opens a relative
@@ -164,7 +197,9 @@ import uirelays/layout
 import focim/[synedit, terminal, config, wordindex, cliphistory, search,
               filesearch]
 import focim/track
+import focim/configstore
 import focim/completion
+import focim/panels
 
 # Derived from focim-icon.png by `iconbundler --prepare focim`.
 when defined(windows):
@@ -185,72 +220,6 @@ else:
     ## Windows takes its icon from the linked `.res` and macOS from the bundle,
     ## so there is nothing for the window itself to carry.
 
-const defaultConfig = """
-(config
-  (layout
-    (cols
-      (rows (px 200)
-        (tabs (lines 6))
-        (explorer))
-      (editor (stretch 4))
-      (rows (stretch 2)
-        (clipboard (lines 9))
-        (history (lines 5))
-        (terminal)))
-    (status (lines 1)))
-  # Anything left out keeps the color it has; `doc/config.md` lists
-  # the fields.
-  # Every token class is written out below, so any of them can be recolored by
-  # editing the line rather than by first finding out that the class exists.
-  # A color may be followed by (bold), by (italics), or by both.
-  (theme
-    (bg "#15171B")
-    (fg "#E6DFD1"                     # the base color, for anything unnamed
-      (None "#E6DFD1")
-      (Whitespace "#E6DFD1")
-      (DecNumber "#E8833A")
-      (BinNumber "#E8833A")
-      (HexNumber "#E8833A")
-      (OctNumber "#E8833A")
-      (FloatNumber "#E8833A")
-      (Identifier "#E6DFD1")
-      (Keyword "#E5B94E" (bold))
-      (StringLit "#2EC4B6")
-      (LongStringLit "#2EC4B6")
-      (CharLit "#2EC4B6")
-      (Backticks "#2EC4B6")
-      (EscapeSequence "#F2A65A")
-      (Operator "#C9A227")
-      (Punctuation "#8C8578")
-      (Comment "#7A7365" (italics))
-      (LongComment "#7A7365" (italics))
-      (RegularExpression "#E8833A")
-      (TagStart "#E5B94E")            # markup
-      (TagStandalone "#E5B94E")
-      (TagEnd "#E5B94E")
-      (Key "#2EC4B6")                 # ini, nif, config files
-      (Value "#E8833A")
-      (RawData "#2EC4B6")
-      (Assembler "#E5B94E")
-      (Preprocessor "#1FA398")
-      (Directive "#1FA398")
-      (Command "#E5B94E")
-      (Rule "#1FA398")
-      (Link "#4FD1C5")
-      (Label "#E8833A")
-      (Reference "#E8833A")
-      (Text "#E6DFD1")
-      (Other "#E6DFD1")
-      (Green "#4FBF9F")               # the three the terminal colors by name
-      (Yellow "#E5B94E")
-      (Red "#E4634A")
-      (MarkdownFence "#7A7365")))
-  # Who answers a Ctrl+click on a name: "nim", "nimony", or "none" for nobody.
-  # (exe "...") names the binary when it is not simply on the PATH.
-  (track
-    (compiler "nim")))
-"""
-
 const
   PathChars = {'a'..'z', 'A'..'Z', '0'..'9', '_', '.', '/', '\\',
                '-', '~', '\128'..'\255'}
@@ -261,11 +230,6 @@ const
   DefaultFontSize = 16
   MinFontSize = 8
   MaxFontSize = 56
-  ## A layout may leave any widget out -- it is then simply not drawn, and
-  ## keeps its state until a later layout brings it back. Only the editor
-  ## has to stay: without it there is nowhere to type the layout back.
-  RequiredCells = ["editor"]
-  ConfigDirName = "focim"
   WordsDirName = "words"
     ## Under the config dir: one file per indexed path, so that `index` is
     ## paid for once and not on every start.
@@ -322,22 +286,33 @@ const
     ## already reads as a program printing, and a repaint per peek would read
     ## exactly the same at twenty times the price.
 
-proc configPath(name: string): string =
-  getConfigDir() / ConfigDirName / name
+static:
+  # The theme a widget falls back to and the theme a fresh config file names
+  # are the same theme. Nothing enforces that but this line.
+  doAssert defaultConfig == shippedConfig(defaultTheme()),
+           "ShippedThemes[0] is not defaultTheme()"
+  # And every one of them is a config this app can actually run on. A theme is
+  # offered in a prompt, where the answer to picking a broken one would be a
+  # parse error in the status bar; checked here, that answer cannot ship.
+  for i in 0 ..< ShippedConfigs.len:
+    let c = parseConfig(ShippedConfigs[i])
+    doAssert c.error.len == 0, ShippedThemes[i].name & ": " & c.error
+    doAssert c.note.len == 0, ShippedThemes[i].name & ": " & c.note
+  # The other lane says where the widgets go, and the app needs some of them.
+  let l = parseLayout(defaultLayout)
+  doAssert l.error.len == 0, "the shipped layout: " & l.error
+  doAssert panelsOf(l.cellNames, EditorStem).len > 0,
+           "the shipped layout has no editor cell"
 
-proc saveConfig(name, text: string) =
-  ## Best effort: an unwritable config dir must not take the editor down.
-  try:
-    createDir(configPath(name).parentDir)
-    writeFile(configPath(name), text)
-  except CatchableError:
-    discard
-
-proc loadConfig(name: string): string =
-  try:
-    result = readFile(configPath(name))
-  except CatchableError:
-    result = ""
+var gEditorCell = "editor"
+  ## The cell the editor panel that the keystrokes are going to is drawn in.
+  ## A global for the reason `gUiScale` below is one: every helper that hands
+  ## the focus back to the editor after doing its work needs it, and none of
+  ## them cares about anything else the window knows. It cannot be the word
+  ## "editor" any more -- after a split the panel in question may be
+  ## `editor3`, and the window may well have no cell called `editor` at all.
+var gTerminalCell = "terminal"
+  ## The same for the terminal a command goes to.
 
 var gUiScale = 100
   ## Percent to enlarge text by on this display, from `ScreenLayout.uiScale`.
@@ -403,10 +378,26 @@ proc extractFilePosition(s: SynEdit; pos: int):
     result = (path, -1, -1, a, b)
 
 type
+  BufferKind = enum
+    ## A buffer is a file, or it is one of the two settings *lanes*: a tab
+    ## whose text is a file under the config dir and takes effect as it is
+    ## typed. Two of them rather than one because they answer different
+    ## questions and change on different days -- the colors are picked once
+    ## and the panels are shoved about all the time -- and because a theme
+    ## that arrived in the same text as the layout could not be replaced
+    ## without replacing the layout too.
+    bufFile,            ## a file, or a scratch buffer with no file yet
+    bufConfig,          ## this buffer's text IS `config.nif`: theme, tracking
+    bufLayout           ## this buffer's text IS `layout.nif`: where things go
+
   BufferEntry = object
     ed: SynEdit
+    id: int             ## what a panel calls this buffer by. The tab list
+                        ## reorders and closes buffers by rewriting its own
+                        ## lines, so an index into `buffers` is a name that
+                        ## stops meaning what it meant; this one does not.
     path: string        ## "" for generated buffers
-    isConfig: bool      ## this buffer's text IS the window's config
+    kind: BufferKind    ## a file, or one of the settings lanes
     idx: BufferIndexer  ## how far the word index has walked this buffer
     search: BufferSearch ## the hits of the last search in this buffer
     watch: bool         ## does this buffer stand for what is in a file? A
@@ -418,6 +409,26 @@ type
                         ## write through this buffer. What `harddiskCheck`
                         ## compares against, and the whole of what it takes to
                         ## notice that somebody else has written the file.
+
+var gBufferIds = 0
+proc freshBufferId(): int =
+  inc gBufferIds
+  result = gBufferIds
+
+proc isLane(b: BufferEntry): bool = b.kind != bufFile
+  ## A lane stands for a settings file rather than for a file somebody opened:
+  ## it saves itself, it cannot be closed, and no `open` ever lands on it.
+
+proc laneStem(k: BufferKind): string =
+  ## The lane's file, without the extension: also its name in the tab list and
+  ## the stem its backups are numbered off. One word, said once.
+  case k
+  of bufFile: ""
+  of bufConfig: "config"
+  of bufLayout: "layout"
+
+proc laneName(k: BufferKind): string = "[" & laneStem(k) & "]"
+proc laneFile(k: BufferKind): string = laneStem(k) & ".nif"
 
 proc fileStamp(path: string): Time =
   ## The file's modification time, or the zero time for a file that cannot be
@@ -461,7 +472,8 @@ proc newBuffer(font: Font; path: string): BufferEntry =
     ed.setText("cannot read " & path & ": " & getCurrentExceptionMsg())
     ed.readOnly = ed.len - 1
     watch = false
-  result = BufferEntry(ed: ed, path: path, watch: watch, timestamp: stamp)
+  result = BufferEntry(ed: ed, id: freshBufferId(), path: path, watch: watch,
+                       timestamp: stamp)
 
 proc diskContentDiffers(ed: SynEdit; path: string): bool =
   ## Does the file hold something other than what the buffer shows? Asked
@@ -549,7 +561,7 @@ proc displayNames(buffers: seq[BufferEntry]): seq[string] =
   var base: seq[string] = @[]
   for b in buffers:
     base.add(
-      if b.isConfig: "[config]"
+      if b.isLane: laneName(b.kind)
       elif b.path.len > 0: b.path.extractFilename
       else: "[scratch]")
   result = @[]
@@ -646,9 +658,9 @@ proc applyTabEdits(tabs: var TabList; buffers: var seq[BufferEntry];
   # Some tabs refuse to close: put their line back.
   for i in 0 ..< tabs.names.len:
     if not taken[i]:
-      if buffers[i].isConfig:
-        # Closing it would leave no way to edit the config back.
-        tabs.note = "the config buffer stays open"
+      if buffers[i].isLane:
+        # Closing it would leave no way to edit the settings back.
+        tabs.note = laneName(buffers[i].kind) & " stays open"
       elif buffers[i].path.len > 0 and buffers[i].ed.changed:
         # A buffer without a path cannot be saved, so the guard would be
         # a trap rather than a warning.
@@ -671,29 +683,267 @@ proc applyTabEdits(tabs: var TabList; buffers: var seq[BufferEntry];
   for i, n in newNames:
     if n == currentName: current = i
 
-proc reparseConfig(src: string; width, height, lineHeight: int;
-                   layout: var Layout; theme: var Theme; track: var Track;
+proc laneNote(laneNotes: array[BufferKind, string]; fallback: string): string =
+  ## What the status bar says: a lane that cannot be used says why, and the
+  ## config lane goes first -- a window with the wrong colors is still a
+  ## window, and a window whose theme was refused is showing the very text
+  ## that has to be corrected.
+  if laneNotes[bufConfig].len > 0: laneNotes[bufConfig]
+  elif laneNotes[bufLayout].len > 0: laneNotes[bufLayout]
+  else: fallback
+
+proc reparseConfig(src: string; theme: var Theme; track: var Track;
                    note: var string) =
-  ## The config buffer's text IS the window. A config that does not parse, or
-  ## that loses a cell the app needs, is reported and dropped -- the last good
-  ## one keeps the window usable so the text can be corrected. A theme that
-  ## cannot be read is dropped by the parser in the same spirit, and says so in
-  ## `note` while the rest of the config is kept.
+  ## The [config] buffer's text IS the colors of the window and the compiler
+  ## behind a Ctrl+click. One that does not parse is reported and dropped --
+  ## the last good one keeps the window usable so the text can be corrected.
+  ## A theme that cannot be read is dropped by the parser in the same spirit,
+  ## and says so in `note` while the rest of the config is kept.
   let parsed = parseConfig(src)
   if parsed.error.len > 0:
     note = "config: " & parsed.error
     return
-  let cells = parsed.layout.resolve(width, height, lineHeight,
-                                    padding = scaledPx(6), gap = scaledPx(4),
-                                    uiScale = gUiScale)
-  for name in RequiredCells:
-    if name notin cells:
-      note = "config: no '" & name & "' cell"
-      return
-  layout = parsed.layout
   theme = parsed.theme
   track = parsed.track
   note = parsed.note
+
+proc layoutMetrics(width, height, lineHeight: int): LayoutMetrics =
+  ## The numbers a layout becomes rects by. In one place because three things
+  ## ask: the frame that draws the window, the borders a pointer takes hold of
+  ## in it, and the check that a layout has the cells this app cannot do
+  ## without. Two of them working from different numbers would be a border
+  ## that moves to somewhere other than where it was grabbed.
+  LayoutMetrics(screenW: width, screenH: height, lineHeight: lineHeight,
+                padding: scaledPx(6), gap: scaledPx(4), uiScale: gUiScale)
+
+proc reparseLayout(src: string; width, height, lineHeight: int;
+                   layout: var Layout; note: var string) =
+  ## And the [layout] buffer's text IS where the widgets go. Dropped on the
+  ## same terms, with one more of them: a layout may leave any widget out --
+  ## it is then simply not drawn, and keeps its state until a later layout
+  ## brings it back -- but an editor panel has to stay, since a window with no
+  ## editor in it has nowhere to type the layout back. Any of them will do: a
+  ## split may well have left the window with `editor2` and `editor3` and no
+  ## cell called `editor` at all.
+  let parsed = parseLayout(src)
+  if parsed.error.len > 0:
+    note = "layout: " & parsed.error
+    return
+  let names = parsed.cellNames
+  if panelsOf(names, EditorStem).len == 0:
+    note = "layout: no 'editor' cell"
+    return
+  # A buffer keeps a seat for every panel that might show it, so there is a
+  # ceiling on the panels -- and a layout naming more of them would leave the
+  # ones past it drawn by nobody, which is worse than being told.
+  for stem in [EditorStem, TerminalStem]:
+    if panelsOf(names, stem).len > MaxViews:
+      note = "layout: at most " & $MaxViews & " " & stem & " panels"
+      return
+  layout = parsed
+  note = ""
+
+# ---------------------------------------------------------------------------
+# Panels. The layout says which of them the window has -- a cell called
+# `editor2` is a second editor panel -- so the lists below are not a second
+# opinion about that but a reading of it, brought into line whenever the
+# layout changes. Which is also all a split has to do: write the cell into
+# `layout.nif` and let the next frame find it there.
+# ---------------------------------------------------------------------------
+
+type
+  EditorView = object
+    ## A panel showing a buffer. Which buffer is the panel's own business:
+    ## two panels may well show the same one, at different lines, which is
+    ## the whole reason to have two.
+    cell: string        ## the layout cell it is drawn in
+    buf: int            ## the buffer's id -- not its index, which moves
+    slot: int           ## the seat it sits in, in whatever buffer it shows
+
+  TerminalView = object
+    cell: string
+    term: Terminal
+
+  Newborn = object
+    ## A panel that a split has just written into the layout, and the panel it
+    ## was split out of. Kept only until the next frame reads the layout and
+    ## makes the panel, which is when it is used and forgotten.
+    cell, parent: string
+
+  PanelButton = enum
+    ## The three things a panel offers in its own corner. Tilix's two split
+    ## buttons, whose icons are the shape of what they make, and the `(x)`
+    ## every panel of every tiling terminal has had for twenty years.
+    btnNone,
+    btnRight,   ## a panel beside this one
+    btnDown,    ## a panel below it
+    btnClose    ## away with this one
+
+  PanelButtons = object
+    ## Which panel's buttons are showing, and which of them the pointer is on.
+    ## Nothing is drawn until the pointer is inside a panel -- the same rule
+    ## the splitter grips follow, and the reason a window at rest is text and
+    ## nothing else.
+    cell: string
+    hot: PanelButton
+    splits: bool  ## whether this panel can be split at all. The tab list and
+                  ## the status bar cannot: there is nothing to have two of.
+
+proc buttonRect(area: Rect; b: PanelButton; size: int): Rect =
+  ## The three sit in the panel's top right corner, in the order they are
+  ## used: the two that make a panel, then the one that takes it away.
+  let n = case b
+          of btnRight: 2
+          of btnDown: 1
+          of btnClose: 0
+          of btnNone: return Rect(x: 0, y: 0, w: 0, h: 0)
+  let gap = max(2, size div 4)
+  result = rect(area.x + area.w - (n + 1) * (size + gap),
+                area.y + gap, size, size)
+
+proc buttonAt(pb: PanelButtons; area: Rect; size, x, y: int): PanelButton =
+  ## Which of a panel's buttons the pointer is on, if any.
+  result = btnNone
+  for b in [btnClose, btnDown, btnRight]:
+    if b != btnClose and not pb.splits: continue
+    if buttonRect(area, b, size).contains(point(x, y)): return b
+
+proc drawPanelButtons(pb: PanelButtons; area: Rect; size: int; theme: Theme) =
+  ## Drawn, not typed: the shapes say what they do -- a box with a `+` on the
+  ## side the new panel appears on -- and no font has to have a glyph for
+  ## them. The same reason the `(x)` on a tab list line is drawn.
+  template ink(b: PanelButton): Color =
+    if pb.hot == b:
+      if b == btnClose: theme.closeColor else: theme.focusColor
+    else: theme.scrollBarColor
+  for b in [btnClose, btnDown, btnRight]:
+    if b != btnClose and not pb.splits: continue
+    let r = buttonRect(area, b, size)
+    if r.w <= 0 or r.x < area.x: continue
+    let fg = ink(b)
+    if pb.hot == b: fillRect(r, theme.scrollTrackColor)
+    let pad = max(2, size div 5)
+    let x0 = r.x + pad
+    let y0 = r.y + pad
+    let x1 = r.x + r.w - 1 - pad
+    let y1 = r.y + r.h - 1 - pad
+    case b
+    of btnClose:
+      drawLine(x0, y0, x1, y1, fg)
+      drawLine(x1, y0, x0, y1, fg)
+    of btnRight, btnDown:
+      # The box is the panel as it will be, and the `+` stands where the new
+      # one is about to: to the right of it, or under it.
+      let box = if b == btnRight: rect(x0, y0, (x1 - x0) div 2, y1 - y0 + 1)
+                else: rect(x0, y0, x1 - x0 + 1, (y1 - y0) div 2)
+      drawFrame(box, fg, 1)
+      let cx = if b == btnRight: (box.x + box.w + x1 + 1) div 2
+               else: (x0 + x1 + 1) div 2
+      let cy = if b == btnRight: (y0 + y1 + 1) div 2
+               else: (box.y + box.h + y1 + 1) div 2
+      let arm = max(1, pad)
+      drawLine(cx - arm, cy, cx + arm, cy, fg)
+      drawLine(cx, cy - arm, cx, cy + arm, fg)
+    of btnNone: discard
+
+proc anyRunning(views: seq[TerminalView]): bool =
+  ## Is a program running in any of the panels? What decides how soon the next
+  ## frame is due: output arrives on a thread, and nothing else about a frame
+  ## says that it has.
+  for v in views:
+    if v.term.processRunning: return true
+  result = false
+
+proc putLayout(buffers: var seq[BufferEntry]; layout: Layout) =
+  ## The layout as it now stands, back into the `[layout]` tab -- which *is*
+  ## the file, so this is the whole of storing it. One edit, so that Ctrl+Z
+  ## there takes the whole of a drag or a split back, and the lane machinery
+  ## at the top of the loop parses and saves it like any other typing.
+  let tree = $layout
+  if tree.len == 0: return
+  for b in buffers.mitems:
+    if b.kind == bufLayout:
+      let text = withHeader(b.ed.fullText, tree)
+      if b.ed.fullText == text: continue
+      if b.ed.len > 0: b.ed.replaceRange(0, b.ed.len - 1, text)
+      else: b.ed.insertText(text)
+
+proc indexOfId(buffers: seq[BufferEntry]; id: int): int =
+  result = -1
+  for i in 0 ..< buffers.len:
+    if buffers[i].id == id: return i
+
+proc viewOf(views: seq[EditorView]; cell: string): int =
+  result = -1
+  for i in 0 ..< views.len:
+    if views[i].cell == cell: return i
+
+proc freeSlot(views: seq[EditorView]): int =
+  ## The lowest seat number nobody is using. Lowest rather than next, so that
+  ## a window whose panels come and go all afternoon keeps using the same few.
+  for slot in 0 ..< MaxViews:
+    var taken = false
+    for v in views:
+      if v.slot == slot: taken = true
+    if not taken: return slot
+  result = -1
+
+proc reconcileEditors(views: var seq[EditorView]; cells: seq[string];
+                      buffers: var seq[BufferEntry]; current: int;
+                      born: Newborn) =
+  ## Bring the panels into line with what the layout says there are. A panel
+  ## whose cell has gone is dropped -- which closes a *panel*, never a file:
+  ## the buffer stays open and its tab with it -- and a cell nothing is
+  ## drawing gets a panel of its own.
+  let want = panelsOf(cells, EditorStem)
+  var i = 0
+  while i < views.len:
+    if views[i].cell notin want: views.delete i
+    else: inc i
+  for name in want:
+    if views.viewOf(name) >= 0: continue
+    let slot = views.freeSlot
+    if slot < 0: continue
+    var v = EditorView(cell: name, buf: buffers[current].id, slot: slot)
+    # A panel that came out of a split shows what the panel it came out of
+    # shows, at the same line: split, scroll one of them away, and there are
+    # two windows onto one file.
+    let parent = if name == born.cell: views.viewOf(born.parent) else: -1
+    if parent >= 0:
+      v.buf = views[parent].buf
+      let b = buffers.indexOfId(v.buf)
+      if b >= 0: buffers[b].ed.copySeat(views[parent].slot, slot)
+    views.add v
+
+proc reconcileTerminals(views: var seq[TerminalView]; cells: seq[string];
+                        font: Font; theme: Theme; born: Newborn) =
+  ## The same for the terminals, with one difference: a terminal panel whose
+  ## cell has gone is *kept*, and only stops being drawn. What is in it is a
+  ## shell's session -- a program halfway through running, an hour of output,
+  ## a directory somebody walked to -- and none of that can be got back the
+  ## way a file can be reopened. It is also the rule the layout has always
+  ## followed for a widget it leaves out: not drawn, and there again with
+  ## everything it had the moment the cell comes back.
+  ##
+  ## What a new one inherits is the directory of the panel it came out of: a
+  ## terminal split off another is a second prompt where the first one had
+  ## got to.
+  for name in panelsOf(cells, TerminalStem):
+    var have = false
+    for v in views:
+      if v.cell == name: have = true
+    if have: continue
+    var t = createTerminal(font, theme)
+    if name == born.cell:
+      for v in views:
+        if v.cell == born.parent and v.term.cwd != t.cwd:
+          # The prompt is written when the terminal is made, so it has to be
+          # written again for the directory this one really starts in.
+          t.cwd = v.term.cwd
+          t.ed.clear()
+          t.ed.lang = langConsole
+          t.insertPrompt()
+    views.add TerminalView(cell: name, term: t)
 
 # ---------------------------------------------------------------------------
 # Explorer -- a flat listing of one directory, with an editable path line
@@ -875,7 +1125,7 @@ proc activateEntry(ex: var Explorer; idx: int;
     let p = ex.dir / name
     if fileExists(p):
       current = buffers.openFile(font, p, -1, -1)
-      focus = "editor"
+      focus = gEditorCell
 
 # ---------------------------------------------------------------------------
 # Word sets on disk
@@ -961,7 +1211,7 @@ proc handleTermCtrlClick(buf: SynEdit; pos: int;
     discard term.runCommand(lsCmd)
   elif fileExists(path):
     current = buffers.openFile(font, path, ln, fc)
-    focus = "editor"
+    focus = gEditorCell
 
 proc splitMarkdownTarget(url: string): tuple[path, frag: string] =
   ## Split `path#heading` / `#heading` into path and fragment.
@@ -1003,7 +1253,7 @@ proc handleMarkdownCtrlClick(ed: var SynEdit; pos: int;
   let full = if isAbsolute(path): path else: base / path
   if fileExists(full):
     current = buffers.openFile(font, full, -1, -1)
-    focus = "editor"
+    focus = gEditorCell
     note = ""
     if frag.len > 0 and not buffers[current].ed.gotoMarkdownHeading(frag):
       note = "opened, but no heading: #" & frag
@@ -1053,7 +1303,7 @@ proc sourceLine(path: string; line: int; buffers: seq[BufferEntry];
   ## exactly the case where the text on disk would be misleading. Everything
   ## else is read once per file, however many rows point into it.
   for b in buffers:
-    if b.path == path and not b.isConfig:
+    if b.path == path and not b.isLane:
       return b.ed.getLineText(line - 1).strip
   if path notin cache:
     var lines: seq[string] = @[]
@@ -1099,7 +1349,7 @@ proc jumpTo(hit: TrackHit; buffers: var seq[BufferEntry]; current: var int;
     return
   current = buffers.openFile(font, hit.path, -1, -1)
   buffers[current].ed.gotoLineBytes(hit.line, hit.col)
-  focus = "editor"
+  focus = gEditorCell
   note = ""
 
 proc updateStatus(status: var Terminal; ed: SynEdit; path, note: string) =
@@ -1218,7 +1468,7 @@ proc runOpenCommand(act: TermAction; base: string;
     note = ""
   else:
     current = buffers.openFile(font, path, -1, -1)
-    focus = "editor"
+    focus = gEditorCell
     note = ""
 
 proc saveCurrent(buffers: var seq[BufferEntry]; current: int;
@@ -1227,7 +1477,8 @@ proc saveCurrent(buffers: var seq[BufferEntry]; current: int;
   ## says so instead of quietly doing nothing.
   if buffers[current].path.len == 0:
     note =
-      if buffers[current].isConfig: "[config] saves itself"
+      if buffers[current].isLane: laneName(buffers[current].kind) &
+                                  " saves itself"
       else: "this buffer has no file yet: try 's <name>'"
     return
   try:
@@ -1248,10 +1499,11 @@ proc saveBufferAs(buffers: var seq[BufferEntry]; current: int; path: string;
   except CatchableError:
     note = "cannot save " & path & ": " & getCurrentExceptionMsg()
     return
-  if buffers[current].isConfig:
-    # A copy of the config, not a move: tab 0 is where the window is edited,
-    # and `config.nif` under the config dir is where it is read from.
-    note = "wrote " & path.extractFilename & "; [config] stays where it is"
+  if buffers[current].isLane:
+    # A copy of the lane, not a move: the tab is where the setting is edited,
+    # and the file under the config dir is where it is read from.
+    note = "wrote " & path.extractFilename & "; " &
+           laneName(buffers[current].kind) & " stays where it is"
     return
   var full = path
   try: full = expandFilename(path)
@@ -1518,25 +1770,106 @@ proc runAnswer(word: string; asked: var Ask; f: var Finder;
     note = "replaced " & $f.replaced
     asked = Ask()
 
-proc runDefaults(buffers: var seq[BufferEntry]; note: var string) =
-  ## `defaults`: put the config the app ships with back into the [config] tab.
-  ## Written as an edit rather than as a new text, so Ctrl+Z in that tab brings
-  ## a hand-written config back -- which is why this asks nothing first: what
-  ## it replaces is one keystroke away for as long as the tab is open. The
-  ## main loop does the rest, since it already reparses and stores that buffer
+type
+  ConfigPut = enum
+    ## What putting a config into the [config] tab came to.
+    putNoTab     ## there is no such tab, so there was nowhere to put it
+    putSame      ## the tab already says exactly this
+    putDone      ## replaced
+
+proc isShipped(kind: BufferKind; text: string): bool =
+  ## Whether a lane still says exactly what the app put there. Anything else
+  ## is somebody's own work, and is kept before it is replaced.
+  case kind
+  of bufFile: false
+  of bufConfig: shippedName(text).len > 0
+  of bufLayout: text == defaultLayout
+
+proc putLane(buffers: var seq[BufferEntry]; kind: BufferKind; text: string;
+             saved: var string): ConfigPut =
+  ## Put `text` into a lane as an *edit*, so that Ctrl+Z in that tab brings
+  ## back what was there -- which is why nothing is asked first: what this
+  ## replaces is one keystroke away for as long as the tab is open. Text that
+  ## was written by hand goes to a file as well, since a keystroke only lasts
+  ## as long as the session does; `saved` says where, or is "" when there was
+  ## nothing to save (the lane holds what the app shipped) or nowhere to save
+  ## it. The main loop does the rest: it already reparses and stores a lane
   ## whenever it changed.
+  saved = ""
   for b in buffers.mitems:
-    if b.isConfig:
-      if b.ed.fullText == defaultConfig:
-        note = "the config already is the default one"
-      elif b.ed.len > 0:
-        b.ed.replaceRange(0, b.ed.len - 1, defaultConfig)
-        note = "config back to the defaults; Ctrl+Z in [config] undoes it"
-      else:
-        b.ed.insertText(defaultConfig)
-        note = "config back to the defaults"
+    if b.kind == kind:
+      let old = b.ed.fullText
+      if old == text: return putSame
+      if not isShipped(kind, old) and old.strip.len > 0:
+        saved = backupConfig(laneStem(kind), old)
+      if b.ed.len > 0: b.ed.replaceRange(0, b.ed.len - 1, text)
+      else: b.ed.insertText(text)
+      return putDone
+  result = putNoTab
+
+proc putNote(outcome: ConfigPut; kind: BufferKind; saved, what: string;
+             note: var string) =
+  ## The one line all of this has to be said in.
+  case outcome
+  of putNoTab: note = "there is no " & laneName(kind) & " tab to put it in"
+  of putSame: note = laneName(kind) & " already is " & what
+  of putDone:
+    note = laneName(kind) & ": " & what
+    if saved.len > 0: note.add "; the edited one is in " & saved
+    else: note.add "; Ctrl+Z in " & laneName(kind) & " undoes it"
+
+proc runDefaults(buffers: var seq[BufferEntry]; note: var string) =
+  ## `defaults`: put back what the app ships with -- both lanes of it, since
+  ## the window one is looking at is the two of them together, and since that
+  ## is what this word put back when they were one file.
+  var savedConfig, savedLayout = ""
+  let c = putLane(buffers, bufConfig, defaultConfig, savedConfig)
+  let l = putLane(buffers, bufLayout, defaultLayout, savedLayout)
+  if c == putSame and l == putSame:
+    note = "both lanes already say what the app ships with"
+    return
+  note = "config and layout back to the defaults (" & ShippedThemes[0].name &
+         ")"
+  var kept: seq[string] = @[]
+  if savedConfig.len > 0: kept.add savedConfig
+  if savedLayout.len > 0: kept.add savedLayout
+  if kept.len == 0: note.add "; Ctrl+Z in a lane undoes it"
+  else:
+    note.add "; the edited " & (if kept.len == 1: "one is" else: "ones are") &
+             " in " & kept.join(" and ")
+
+proc themeList(buffers: seq[BufferEntry]): string =
+  ## What `theme` on its own answers: the names, what each one looks like, and
+  ## which of them is up.
+  result = "themes: "
+  for i in 0 ..< ShippedThemes.len:
+    if i > 0: result.add ", "
+    result.add ShippedThemes[i].name & " (" & ShippedThemes[i].blurb & ")"
+  var now = ""
+  for b in buffers:
+    if b.kind == bufConfig:
+      now = shippedName(b.ed.fullText)
+      break
+  result.add "; now: " & (if now.len > 0: now else: "a config of your own")
+
+proc runTheme(name: string; buffers: var seq[BufferEntry]; note: var string) =
+  ## `theme` lists what there is, `theme <name>` puts one of them in the
+  ## [config] tab. A theme is that whole lane and not a palette spliced into
+  ## the text that is there, and a config that had been edited is saved off to
+  ## a file first -- see `putLane`. The [layout] lane is not touched: where
+  ## the panels are has nothing to do with what color they are.
+  if name.len == 0:
+    note = themeList(buffers)
+    return
+  for i in 0 ..< ShippedThemes.len:
+    if ShippedThemes[i].name == name:
+      # The very text `shippedName` recognizes, so that a tab holding a theme
+      # is a tab nothing has to be backed up out of when the next one lands.
+      var saved = ""
+      putNote(putLane(buffers, bufConfig, ShippedConfigs[i], saved), bufConfig,
+              saved, name, note)
       return
-  note = "there is no [config] tab to put it in"
+  note = "'" & name & "' is not one of the themes: " & themeNames()
 
 proc runSave(act: TermAction; asked: var Ask; buffers: var seq[BufferEntry];
              current: int; note: var string) =
@@ -1635,10 +1968,22 @@ proc adjustFocusedFontSize(
     fonts: var Table[int, Font];
     history: var SynEdit;
     tabs: var TabList; explorer: var Explorer;
-    term, status: var Terminal; clips: var ClipHistory;
+    terms: var seq[TerminalView]; status: var Terminal;
+    clips: var ClipHistory;
     buffers: var seq[BufferEntry]; current: int;
     panelFontSize, historyFontSize,
     terminalFontSize, statusFontSize, editorFontSize: var int) =
+  if focus.isEditor:
+    editorFontSize = clamp(editorFontSize + delta, MinFontSize, MaxFontSize)
+    let newFont = fonts.fontForSize(editorFontSize)
+    for i in 0 ..< buffers.len:
+      buffers[i].ed.setFont(newFont)
+    return
+  if focus.isTerminal:
+    terminalFontSize = clamp(terminalFontSize + delta, MinFontSize, MaxFontSize)
+    let f = fonts.fontForSize(terminalFontSize)
+    for i in 0 ..< terms.len: terms[i].term.ed.setFont(f)
+    return
   case focus
   of "tabs", "explorer", "clipboard":
     panelFontSize = clamp(panelFontSize + delta, MinFontSize, MaxFontSize)
@@ -1649,17 +1994,9 @@ proc adjustFocusedFontSize(
   of "history":
     historyFontSize = clamp(historyFontSize + delta, MinFontSize, MaxFontSize)
     history.setFont(fonts.fontForSize(historyFontSize))
-  of "terminal":
-    terminalFontSize = clamp(terminalFontSize + delta, MinFontSize, MaxFontSize)
-    term.ed.setFont(fonts.fontForSize(terminalFontSize))
   of "status":
     statusFontSize = clamp(statusFontSize + delta, MinFontSize, MaxFontSize)
     status.ed.setFont(fonts.fontForSize(statusFontSize))
-  of "editor":
-    editorFontSize = clamp(editorFontSize + delta, MinFontSize, MaxFontSize)
-    let newFont = fonts.fontForSize(editorFontSize)
-    for i in 0 ..< buffers.len:
-      buffers[i].ed.setFont(newFont)
   else:
     discard
 
@@ -1686,7 +2023,22 @@ proc main =
   setWindowTitle("focim")
 
   var history = createSynEdit(font)
-  var term = createTerminal(font)
+  # The panels: one entry per cell the layout names, made and unmade as the
+  # layout says so. `reconcileEditors` and `reconcileTerminals` keep them in
+  # step with it; `activeEditor` and `activeTerm` say which of them the
+  # keystrokes and the commands mean.
+  var editors: seq[EditorView] = @[]
+  var terms: seq[TerminalView] = @[]
+  var activeEditor = 0
+  var activeTerm = 0
+  # There is a terminal from the start, whether or not the layout shows one:
+  # a command can be typed in the status bar and run in a panel nobody has on
+  # screen, and the shell it runs in has to have been somewhere all along.
+  terms.add TerminalView(cell: TerminalStem, term: createTerminal(font))
+  template term: untyped = terms[activeTerm].term
+  # A panel a split has just written into the layout, waiting for the frame
+  # that reads the layout back and makes it.
+  var born = Newborn()
   var status = createTerminal(font)
   # What makes this one the prompt rather than a second terminal: it takes the
   # questions (`question`), it resolves relative paths against the current tab
@@ -1715,32 +2067,69 @@ proc main =
   var statusFontSize = DefaultFontSize
   var editorFontSize = DefaultFontSize
 
-  # The config the window starts with: whatever was stored last time, unless it
-  # no longer works -- then the default, with the reason in the status bar.
+  # What the window starts as: whatever was stored last time, unless it no
+  # longer works -- then the default, with the reason in the status bar. The
+  # shipped ones go through the same door first, so that a mistake in what the
+  # app itself ships is caught here and not in somebody's window.
   var layout = default(Layout)
   var theme = defaultTheme()
   var trackSpec = defaultTrack()
-  var configNote = ""
-  reparseConfig(defaultConfig, width, height, fm.lineHeight, layout, theme,
-                trackSpec, configNote)
-  doAssert configNote.len == 0, configNote
+  var laneNotes: array[BufferKind, string]
+  reparseConfig(defaultConfig, theme, trackSpec, laneNotes[bufConfig])
+  doAssert laneNotes[bufConfig].len == 0, laneNotes[bufConfig]
+  reparseLayout(defaultLayout, width, height, fm.lineHeight, layout,
+                laneNotes[bufLayout])
+  doAssert laneNotes[bufLayout].len == 0, laneNotes[bufLayout]
+
   var configText = loadConfig("config.nif")
+  var layoutText = loadConfig("layout.nif")
+  # A config from when the layout lived in it: move the block across before
+  # anything is parsed, and keep the file it came out of. Runs once -- what it
+  # writes has no layout in it to find the next time.
+  var moved = ""
+  block:
+    var taken = ""
+    let rest = takeLayout(configText, taken)
+    if taken.len > 0:
+      let kept = backupConfig("config", configText)
+      configText = rest
+      saveConfig("config.nif", configText)
+      if layoutText.len == 0:
+        layoutText = taken
+        saveConfig("layout.nif", layoutText)
+        moved = "the layout moved to " & configPath("layout.nif")
+      else:
+        # There is a layout.nif already, so the one in the config is the older
+        # of the two and nothing is lost by dropping it -- least of all here,
+        # where the file it was in has just been copied.
+        moved = "the layout in config.nif was left behind; layout.nif has one"
+      if kept.len > 0: moved.add "; the config it was in is in " & kept
+
   if configText.len > 0:
-    reparseConfig(configText, width, height, fm.lineHeight, layout, theme,
-                  trackSpec, configNote)
-    if configNote.len > 0:
+    reparseConfig(configText, theme, trackSpec, laneNotes[bufConfig])
+    if laneNotes[bufConfig].len > 0:
       # Whatever was wrong with it, the stored text stays in the buffer: it is
       # what has to be corrected. Until it parses the window runs on the
       # default, which the call above left in place.
-      configNote = configPath("config.nif") & ": " & configNote
+      laneNotes[bufConfig] = configPath("config.nif") & ": " &
+                             laneNotes[bufConfig]
   else:
     configText = defaultConfig
+  if layoutText.len > 0:
+    reparseLayout(layoutText, width, height, fm.lineHeight, layout,
+                  laneNotes[bufLayout])
+    if laneNotes[bufLayout].len > 0:
+      laneNotes[bufLayout] = configPath("layout.nif") & ": " &
+                             laneNotes[bufLayout]
+  else:
+    layoutText = defaultLayout
 
-  # Buffer list. The config buffer is tab 0: editing it relayouts and recolors
-  # the window on the next frame. The rest of the tabs are last session's.
+  # Buffer list. The two lanes are tabs 0 and 1: editing one recolors the
+  # window on the next frame, editing the other relayouts it. The rest of the
+  # tabs are last session's.
   var buffers: seq[BufferEntry]
   var current = 0
-  block:
+  for lane in [(bufConfig, configText), (bufLayout, layoutText)]:
     var ed = createSynEdit(fonts.fontForSize(editorFontSize))
     # NIF is close enough to Nim for the tokenizer: parentheses, names, numbers
     # and '#' comments all land where they should -- and a quoted "#RRGGBB" is
@@ -1749,18 +2138,27 @@ proc main =
     ed.lang = langNim
     ed.flags = {rfColorLiterals}
     ed.showLineNumbers = true
-    ed.setText(configText)
-    buffers.add BufferEntry(ed: ed, path: "", isConfig: true)
+    ed.setText(lane[1])
+    buffers.add BufferEntry(ed: ed, id: freshBufferId(), path: "",
+                            kind: lane[0])
   for line in loadConfig("tabs.txt").splitLines:
     let p = line.strip
     if p.len > 0 and fileExists(p):
       discard buffers.openFile(fonts.fontForSize(editorFontSize), p, -1, -1)
   if paramCount() >= 1:
     current = buffers.openFile(fonts.fontForSize(editorFontSize), paramStr(1), -1, -1)
-  elif buffers.len > 1:
-    current = 1
+  else:
+    # The first tab that is a file, if the last session left one; otherwise the
+    # config lane, which is at least something to look at.
+    for i, b in buffers:
+      if not b.isLane:
+        current = i
+        break
 
   var savedTabs = tabsText(buffers)
+  # Said once the tabs exist to say it in: a move nobody asked for is a thing
+  # to be told about, and both halves of it are open in front of them.
+  if moved.len > 0: tabs.note = moved
 
   renderTabs(tabs, buffers)
   explorer.showDir(
@@ -1773,11 +2171,23 @@ proc main =
   var shownTab = -1
   var tabsHadFocus = false
 
-  var focus = "editor"
+  var focus = gEditorCell
+  # The panel the pointer is in, and its three buttons: a panel to the right,
+  # a panel below, and away with this one. Drawn only while the pointer is in
+  # the panel, the way the splitter grips are, so nothing is on screen until
+  # it is wanted.
+  var buttons = PanelButtons()
   # Where the pointer was last seen. A wheel event carries its delta in `x`
   # and `y` and nothing about where it happened, so this is what says which
   # panel the wheel is over.
   var pointerX, pointerY = -1
+  # The border being dragged, and the one merely under the pointer. A window
+  # is sized by pushing the borders between its panels about, and the borders
+  # are already there: the gap the layout leaves between two cells, which the
+  # background shows through. Nothing is drawn to make a handle, and no panel
+  # gives up a pixel to one.
+  var dragging = Splitter()
+  var hovering = Splitter()
 
   # The words Ctrl+Space can offer: the shipped Nimony vocabulary, whatever
   # `index` was pointed at in an earlier run, and -- from here on, a slice per
@@ -1839,7 +2249,7 @@ proc main =
     var e = default Event
     let waitMs = min(
       if job.active: 0
-      elif tracker.busy or term.processRunning: WorkPollMs
+      elif tracker.busy or anyRunning(terms): WorkPollMs
       else: IdleFrameMs,
       max(0, nextFrame - getTicks()))
     if waitEvent(e, waitMs, {WantTextInput}): mustDraw = true
@@ -1853,11 +2263,18 @@ proc main =
     # The buffer's own changed flag is the signal; consuming it here re-parses
     # once per edit, whether the new config works out or not.
     for b in buffers.mitems:
-      if b.isConfig and b.ed.changed:
+      if b.isLane and b.ed.changed:
         let src = b.ed.fullText
-        reparseConfig(src, width, height, fm.lineHeight, layout, theme,
-                      trackSpec, configNote)
-        if configNote.len == 0: saveConfig("config.nif", src)
+        case b.kind
+        of bufConfig: reparseConfig(src, theme, trackSpec, laneNotes[bufConfig])
+        of bufLayout:
+          reparseLayout(src, width, height, fm.lineHeight, layout,
+                        laneNotes[bufLayout])
+        of bufFile: discard
+        # Stored only once it works. A file that says something the window
+        # could not be built from would come back as the same complaint on
+        # every start, and the text that has to be corrected is in the tab.
+        if laneNotes[b.kind].len == 0: saveConfig(laneFile(b.kind), src)
         b.ed.markSaved()
         mustDraw = true
 
@@ -1874,7 +2291,7 @@ proc main =
     history.theme = panelTheme
     tabs.ed.theme = panelTheme
     explorer.ed.theme = panelTheme
-    term.ed.theme = panelTheme
+    for i in 0 ..< terms.len: terms[i].term.ed.theme = panelTheme
     status.ed.theme = panelTheme
     comp.theme = panelTheme
     comp.setFont buffers[current].ed.getFont
@@ -1887,7 +2304,7 @@ proc main =
     history.blinks = windowFocused
     tabs.ed.blinks = windowFocused
     explorer.ed.blinks = windowFocused
-    term.ed.blinks = windowFocused
+    for i in 0 ..< terms.len: terms[i].term.ed.blinks = windowFocused
     status.ed.blinks = windowFocused
     clips.blinks = windowFocused
     # The prompt has no directory of its own, so a relative path typed there is
@@ -1918,8 +2335,9 @@ proc main =
     # Bring about, and not demand: output is the one thing here that arrives
     # in a stream rather than one at a time, and a keystroke is worth a frame
     # of its own in a way that another line of a build log is not.
-    if term.update():
-      nextFrame = min(nextFrame, getTicks() + OutputFrameMs)
+    for i in 0 ..< terms.len:
+      if terms[i].term.update():
+        nextFrame = min(nextFrame, getTicks() + OutputFrameMs)
     for b in buffers.mitems:
       b.ed.theme = theme
       b.ed.blinks = windowFocused
@@ -1986,7 +2404,7 @@ proc main =
       else:
         comp.choose(trackRows(jumps, tracker.project.parentDir, buffers),
                     buffers[current].ed)
-        focus = "editor"
+        focus = gEditorCell
 
     # Everything above was a look; below is the frame. An index job's count
     # is deliberately not among the things that ask for one -- a job wants the
@@ -1995,9 +2413,46 @@ proc main =
     if not mustDraw and getTicks() < nextFrame: continue
     mustDraw = false
 
-    let cells = layout.resolve(width, height, fm.lineHeight,
-                               padding = scaledPx(6), gap = scaledPx(4),
-                               uiScale = gUiScale)
+    let lm = layoutMetrics(width, height, fm.lineHeight)
+    # Borders, before the layout is resolved, so that a drag is in the frame
+    # it happened in rather than in the one after it. What a drag changes is
+    # the layout itself; the text of it is written back once, on the release --
+    # a buffer edited on every mouse move would be a hundred entries in the
+    # undo stack and a reparse for each of them.
+    case e.kind
+    of MouseDownEvent:
+      if e.button == LeftButton:
+        let s = layout.splitterAt(lm, e.x, e.y)
+        if s.found:
+          dragging = s
+          e = default Event
+    of MouseMoveEvent:
+      if dragging.found:
+        discard layout.dragTo(lm, dragging, e.x, e.y)
+        e = default Event
+      else:
+        hovering = layout.splitterAt(lm, e.x, e.y)
+    of MouseUpEvent:
+      if dragging.found:
+        # The tab is the file, so this is where a drag ends up.
+        putLayout(buffers, layout)
+        dragging = Splitter()
+        e = default Event
+    of WindowFocusLostEvent:
+      # A button released over another window is a release this one never
+      # hears about, and a border that went on following the pointer after
+      # that would be a window that resizes itself while nobody is looking.
+      dragging = Splitter()
+    else: discard
+
+    let cells = layout.resolve(lm)
+    # The panels are whatever the layout says they are: a split writes a cell
+    # into `layout.nif` and this is where that cell becomes a panel, as does
+    # one typed into the file by hand.
+    reconcileEditors(editors, layout.cellNames, buffers, current, born)
+    reconcileTerminals(terms, layout.cellNames,
+                       fonts.fontForSize(terminalFontSize), panelTheme, born)
+    born = Newborn()
 
     # Only ever one question is outstanding, and anything the user starts
     # instead of answering it withdraws it -- otherwise the next line typed
@@ -2009,13 +2464,50 @@ proc main =
       if a.kind notin {TermActionKind.noAction, TermActionKind.ctrlHover,
                        TermActionKind.ctrlClick, answer}:
         endExchange()
+    # Which panel the keystrokes are going to, and which buffer that panel is
+    # showing. Everything below that reaches for `buffers[current].ed` -- a
+    # clipping pasted into it, a completion, a jump to a definition, the line
+    # the status bar reports -- means this panel and no other, so its seat is
+    # the one the buffer wears from here to the end of the frame. The panels
+    # that are merely drawn borrow the buffer across their own `draw` and hand
+    # it straight back; see the editor block.
+    for i in 0 ..< editors.len:
+      if editors[i].cell == focus: activeEditor = i
+    if activeEditor >= editors.len: activeEditor = 0
+    if editors.len > 0:
+      gEditorCell = editors[activeEditor].cell
+      let b = buffers.indexOfId(editors[activeEditor].buf)
+      if b >= 0: current = b
+      editors[activeEditor].buf = buffers[current].id
+      buffers[current].ed.enter editors[activeEditor].slot
+    for i in 0 ..< terms.len:
+      if terms[i].cell == focus: activeTerm = i
+    if activeTerm >= terms.len: activeTerm = 0
+    if terms[activeTerm].cell notin cells:
+      # The layout is not showing the terminal the commands were going to, so
+      # they go to one it does show.
+      for i in 0 ..< terms.len:
+        if terms[i].cell in cells:
+          activeTerm = i
+          break
+    gTerminalCell = terms[activeTerm].cell
+
     # A layout may have dropped the cell that had the focus.
-    if focus notin cells: focus = "editor"
+    if focus notin cells: focus = gEditorCell
 
     # Fill background -- gaps between cells show this color as borders, so it
     # comes from the theme: `actionColor` is what the theme already uses to
     # frame things.
     fillRect(rect(0, 0, width, height), theme.actionColor)
+
+    # The border under the pointer, in the colors the theme already keeps for
+    # a thing that is dragged: this is a scrollbar grip by another name, and a
+    # window whose panels can be pushed about has to say so before they are.
+    let grip = if dragging.found: dragging else: hovering
+    if grip.found:
+      fillRect(layout.splitterRect(lm, grip),
+               if dragging.found: theme.scrollBarActiveColor
+               else: theme.scrollBarColor)
 
     case e.kind
     of QuitEvent, WindowCloseEvent:
@@ -2034,7 +2526,8 @@ proc main =
         tabs.ed.setFont(panelFont)
         explorer.ed.setFont(panelFont)
         history.setFont(fonts.fontForSize(historyFontSize))
-        term.ed.setFont(fonts.fontForSize(terminalFontSize))
+        let terminalFont = fonts.fontForSize(terminalFontSize)
+        for i in 0 ..< terms.len: terms[i].term.ed.setFont(terminalFont)
         status.ed.setFont(fonts.fontForSize(statusFontSize))
         let editorFont = fonts.fontForSize(editorFontSize)
         for i in 0 ..< buffers.len:
@@ -2048,15 +2541,26 @@ proc main =
       # for the wheel is not a decision to type there. The event is consumed,
       # so the focused panel does not scroll along with the one under the
       # pointer.
-      case cells.hitTest(pointerX, pointerY).name
-      of "editor": buffers[current].ed.wheelScroll(e.y)
+      let under = cells.hitTest(pointerX, pointerY).name
+      case under
       of "tabs": tabs.ed.wheelScroll(e.y)
       of "explorer": explorer.ed.wheelScroll(e.y)
       of "history": history.wheelScroll(e.y)
       of "clipboard": clips.wheelScroll(e.y)
-      of "terminal": term.ed.wheelScroll(e.y)
       of "status": status.ed.wheelScroll(e.y)
-      else: discard
+      else:
+        if under.isEditor:
+          # Scrolling is the panel's own affair and not the buffer's, so the
+          # panel takes its seat for as long as it takes to scroll it.
+          let i = editors.viewOf(under)
+          let b = if i >= 0: buffers.indexOfId(editors[i].buf) else: -1
+          if b >= 0:
+            buffers[b].ed.enter editors[i].slot
+            buffers[b].ed.wheelScroll(e.y)
+            if b == current: buffers[b].ed.enter editors[activeEditor].slot
+        elif under.isTerminal:
+          for i in 0 ..< terms.len:
+            if terms[i].cell == under: terms[i].term.ed.wheelScroll(e.y)
       e = default Event
     of MouseDownEvent:
       pointerX = e.x
@@ -2110,7 +2614,7 @@ proc main =
         endExchange()
         gotoNextMatch(buffers, current, finder, ShiftPressed in e.mods, theme,
                       tabs.note)
-        focus = "editor"
+        focus = gEditorCell
         e = default Event  # consume the event
       elif cmd and e.key == KeyW:
         # Close the current tab by deleting its line, so that it goes through
@@ -2121,12 +2625,12 @@ proc main =
       elif cmd and (e.key == KeyEqual or e.key == KeyPlus or e.key == KeyMinus):
         let delta = if e.key == KeyMinus: -1 else: 1
         adjustFocusedFontSize(focus, delta, fonts, history,
-                              tabs, explorer, term, status, clips,
+                              tabs, explorer, terms, status, clips,
                               buffers, current,
                               panelFontSize, historyFontSize,
                               terminalFontSize, statusFontSize, editorFontSize)
         e = default Event  # consume the event
-      elif cmd and e.key in {Key1 .. Key9} and focus == "editor" and
+      elif cmd and e.key in {Key1 .. Key9} and focus.isEditor and
            "clipboard" in cells:
         # The panel is numbered, so a row is taken by its number rather than by
         # being selected first. Nothing has to be up, nothing has to be aimed
@@ -2134,14 +2638,14 @@ proc main =
         let text = clips.entry(ord(e.key) - ord(Key1) + 1)
         if text.len > 0: buffers[current].ed.insertText(text)
         e = default Event  # consume the event
-      elif cmd and e.key == KeySpace and focus == "editor":
+      elif cmd and e.key == KeySpace and focus.isEditor:
         comp.show(words, buffers[current].ed)
         if not comp.active:
           tabs.note = if comp.prefix.len > 0:
                         "no word starts with '" & comp.prefix & "'"
                       else: "no words indexed yet"
         e = default Event  # consume the event
-      elif focus == "editor" and comp.handleKey(e, buffers[current].ed):
+      elif focus.isEditor and comp.handleKey(e, buffers[current].ed):
         # While the listing is up a few keys belong to it. Everything else --
         # letters, backspace, the arrows sideways -- goes to the editor as
         # usual and narrows the listing through the prefix.
@@ -2157,7 +2661,7 @@ proc main =
         let idx = tabs.ed.currentLine
         if idx < buffers.len:
           current = idx
-          focus = "editor"
+          focus = gEditorCell
         e = default Event
       elif e.key == KeyEnter and focus == "explorer":
         let line = explorer.ed.currentLine
@@ -2168,7 +2672,7 @@ proc main =
           elif full.len > 0 and fileExists(full):
             current = buffers.openFile(fonts.fontForSize(editorFontSize),
                                        full, -1, -1)
-            focus = "editor"
+            focus = gEditorCell
           elif explorer.entries.len > 0:
             # A partial name accepts the first match.
             explorer.activateEntry(0, buffers, current,
@@ -2180,6 +2684,59 @@ proc main =
                                  term.cwd, tabs.note)
         e = default Event
     else: discard
+
+    # What a button does, and what `split` and `unsplit` do in the prompt --
+    # one description of it, since they are the same act. Both come down to an
+    # edit of the layout, which the next frame reads back and turns into a
+    # panel.
+    template splitPanelAt(panel: string; sideways: bool) =
+      let stem = stemOf(panel)
+      if stem.len == 0:
+        tabs.note = panel & " is not a panel there can be two of"
+      elif panelsOf(layout.cellNames, stem).len >= MaxViews:
+        tabs.note = "at most " & $MaxViews & " " & stem & " panels"
+      else:
+        let fresh = freeName(layout.cellNames, stem)
+        if layout.splitCell(panel, fresh, sideways):
+          born = Newborn(cell: fresh, parent: panel)
+          putLayout(buffers, layout)
+          # The panel asked for is the one to type in, so it takes the
+          # keystrokes. It exists from the next frame, when the layout is read
+          # back -- and for exactly that long `focus` names a cell that is not
+          # there yet, which is what `focus notin cells` is already for.
+          focus = fresh
+
+    template closePanelAt(panel: string) =
+      if panel.isEditor and panelsOf(layout.cellNames, EditorStem).len == 1:
+        tabs.note = "the last editor panel stays: there would be nowhere " &
+                    "to type the layout back"
+      elif layout.removeCell(panel):
+        putLayout(buffers, layout)
+        if focus == panel: focus = gEditorCell
+
+    # The panel the pointer is in offers three buttons in its top right
+    # corner. Tested here, before a single widget is drawn, and the event is
+    # taken away when one of them is hit: a click on a button is not also a
+    # click in the text under it.
+    let btnSize = max(scaledPx(9), fm.lineHeight - scaledPx(3))
+    block:
+      let over = cells.hitTest(pointerX, pointerY)
+      if over.name.len == 0:
+        buttons = PanelButtons()
+      else:
+        buttons = PanelButtons(cell: over.name, hot: btnNone,
+                               splits: over.name.isEditor or
+                                       over.name.isTerminal)
+        buttons.hot = buttons.buttonAt(cells[over.name], btnSize,
+                                       pointerX, pointerY)
+      if e.kind == MouseDownEvent and e.button == LeftButton and
+         buttons.hot != btnNone:
+        case buttons.hot
+        of btnRight, btnDown: splitPanelAt(buttons.cell, buttons.hot == btnRight)
+        of btnClose: closePanelAt(buttons.cell)
+        of btnNone: discard
+        buttons.hot = btnNone
+        e = default Event
 
     # Widgets the layout leaves out are simply not drawn. They keep their
     # state, so they come back exactly as they were once a layout lists
@@ -2226,7 +2783,12 @@ proc main =
       let idx = tabs.ed.currentLine
       if idx < buffers.len:
         current = idx
-        focus = "editor"
+        # The tab list picks the file for the panel the keystrokes were going
+        # to, and leaves the other panels showing what they were showing.
+        if editors.len > 0:
+          editors[activeEditor].buf = buffers[current].id
+          buffers[current].ed.enter editors[activeEditor].slot
+        focus = gEditorCell
 
     # Explorer -- flat directory listing, line 0 is the path/filter field
     let exFocused = focus == "explorer"
@@ -2266,8 +2828,31 @@ proc main =
       if p.len > 0 and normDir(p.parentDir) != explorer.dir:
         explorer.showDir(p.parentDir)
 
-    # Editor
-    let edAct = buffers[current].ed.draw(e, cells["editor"], focus == "editor")
+    # Editor panels. The focused one is drawn last and its seat is left in
+    # the buffer, because everything after this -- the completion listing, the
+    # status line, the next frame's keystrokes -- means that panel's caret.
+    # The others borrow the buffer they show across their own `draw` and give
+    # it straight back.
+    var edAct = EditAction(kind: noAction)
+    for i in 0 ..< editors.len:
+      if editors[i].cell notin cells: continue
+      let b = buffers.indexOfId(editors[i].buf)
+      if b < 0:
+        # The file this panel was showing has been closed. It shows what the
+        # active panel shows rather than nothing: a blank panel with no way to
+        # put anything in it would be a hole in the window.
+        editors[i].buf = buffers[current].id
+        continue
+      if i == activeEditor: continue
+      buffers[b].ed.enter editors[i].slot
+      discard buffers[b].ed.draw(e, cells[editors[i].cell], false)
+      # Handed back at once when it is the buffer the focused panel is in:
+      # from here to the end of the frame, `buffers[current].ed` has to mean
+      # that panel's caret.
+      if b == current: buffers[b].ed.enter editors[activeEditor].slot
+    if editors.len > 0 and editors[activeEditor].cell in cells:
+      edAct = buffers[current].ed.draw(e, cells[editors[activeEditor].cell],
+                                       focus == editors[activeEditor].cell)
     case edAct.kind
     of ctrlClick:
       if buffers[current].ed.lang == langMarkdown:
@@ -2307,13 +2892,14 @@ proc main =
         # Clicking a row pastes it and hands the caret straight back: nobody
         # clicks a clipping in order to end up in the panel.
         buffers[current].ed.insertText(clips.entry(clipAct.take))
-        focus = "editor"
+        focus = gEditorCell
 
     # History panel -- its lines ARE the command list, so a click re-runs a line
     # and the (x) deletes one. The ingest runs even when the layout leaves the
     # panel out, so nothing typed while it was hidden goes missing.
-    for cmd in term.ran: history.addHistoryLine(cmd)
-    term.ran.setLen 0
+    for i in 0 ..< terms.len:
+      for cmd in terms[i].term.ran: history.addHistoryLine(cmd)
+      terms[i].term.ran.setLen 0
     if "history" in cells:
       let histAct = history.draw(e, cells["history"], focus == "history")
       if histAct.kind == closeLine:
@@ -2327,12 +2913,20 @@ proc main =
         var cmd = history.getLineText(history.currentLine)
         if cmd.len > 0:
           discard term.runCommand(cmd)
-          focus = "terminal"
+          focus = gTerminalCell
 
-    # Terminal
+    # Terminal panels. Every one of them is drawn; what one of them *says* is
+    # acted on only when it is the panel being typed in, since a command is
+    # something somebody typed.
     var termAct = TermAction(kind: noAction)
-    if "terminal" in cells:
-      termAct = term.draw(e, cells["terminal"], focus == "terminal")
+    for i in 0 ..< terms.len:
+      if terms[i].cell notin cells: continue
+      let focused = focus == terms[i].cell
+      let a = terms[i].term.draw(e, cells[terms[i].cell], focused)
+      if focused:
+        activeTerm = i
+        gTerminalCell = terms[i].cell
+        termAct = a
     endExchange(termAct)
     case termAct.kind
     of openFile:
@@ -2355,9 +2949,10 @@ proc main =
       discard
     of indexWords:
       runIndexCommand(termAct, words, job, tabs.note)
-    of resetConfig:
-      # Unreachable: `defaults` is the prompt's command, and this is the
-      # terminal -- there the word is a program's name.
+    of resetConfig, selectTheme, splitPanel, closePanel:
+      # Unreachable: `defaults`, `theme` and the panel commands are the
+      # prompt's, and this is the terminal -- there the words are programs'
+      # names.
       discard
     of ctrlHover:
       let (_, _, _, a, b) = term.ed.extractFilePosition(termAct.pos)
@@ -2370,9 +2965,9 @@ proc main =
       term.ed.underline(-1, -1)
 
     # Status bar / prompt -- update prefix when not focused
-    # A broken config is the more urgent of the two notes: it is what the
-    # user is looking at while typing in the [config] tab.
-    let note = if configNote.len > 0: configNote else: tabs.note
+    # A lane that does not parse is the more urgent of the two notes: it is
+    # what the user is looking at while typing in that tab.
+    let note = laneNote(laneNotes, tabs.note)
     if focus != "status":
       updateStatus(status, buffers[current].ed, buffers[current].path, note)
     var statusAct = TermAction(kind: noAction)
@@ -2382,7 +2977,7 @@ proc main =
       # The command has just changed what the line says about the buffer, and
       # the prompt it left behind belongs to a terminal, not to a status bar.
       updateStatus(status, buffers[current].ed, buffers[current].path,
-                   if configNote.len > 0: configNote else: tabs.note)
+                   laneNote(laneNotes, tabs.note))
     endExchange(statusAct)
     case statusAct.kind
     of openFile:
@@ -2395,32 +2990,50 @@ proc main =
       # A question keeps the focus here: the answer is typed into the line the
       # question is shown in. Anything else is finished with, and the caret
       # belongs back in the text.
-      if asked.question.len == 0: focus = "editor"
+      if asked.question.len == 0: focus = gEditorCell
       redrawStatus()
     of searchText:
       runSearch(statusAct, asked, finder, buffers, current, theme, tabs.note)
-      if asked.question.len == 0: focus = "editor"
+      if asked.question.len == 0: focus = gEditorCell
       redrawStatus()
     of gotoMatch:
       gotoNextMatch(buffers, current, finder, statusAct.backwards, theme,
                     tabs.note)
-      focus = "editor"
+      focus = gEditorCell
       redrawStatus()
     of answer:
       asked.question = runAnswer(statusAct.word, asked, finder, buffers,
                                  current, theme, tabs.note)
-      if asked.question.len == 0: focus = "editor"
+      if asked.question.len == 0: focus = gEditorCell
       redrawStatus()
     of indexWords:
       runIndexCommand(statusAct, words, job, tabs.note)
     of resetConfig:
       runDefaults(buffers, tabs.note)
       redrawStatus()
+    of selectTheme:
+      runTheme(statusAct.name, buffers, tabs.note)
+      redrawStatus()
+    of splitPanel:
+      # The panel the keystrokes were going to before they came here to be
+      # typed: a command about the editor means the editor you were in.
+      splitPanelAt(gEditorCell, statusAct.sideways)
+    of closePanel:
+      closePanelAt(gEditorCell)
     of ctrlHover, ctrlClick, noAction: discard
 
     # The completion listing, last: it goes over everything, and it can only
     # be placed once the editor has drawn the caret it hangs from.
-    comp.draw(words, buffers[current].ed, cells["editor"], focus == "editor")
+    if editors.len > 0 and editors[activeEditor].cell in cells:
+      comp.draw(words, buffers[current].ed, cells[editors[activeEditor].cell],
+                focus.isEditor)
+
+    # The buttons of the panel the pointer is in, over its content and under
+    # nothing: a panel is split and closed from where it is, and a button that
+    # took a corner of the text away permanently would cost every panel a
+    # corner for the sake of the two seconds it is wanted.
+    if buttons.cell.len > 0 and buttons.cell in cells:
+      drawPanelButtons(buttons, cells[buttons.cell], btnSize, theme)
 
     # Which panel the next keystroke goes to, said once and in one place. The
     # frame lands in the gap the layout leaves between the cells -- half of it
@@ -2443,7 +3056,7 @@ proc main =
     # less a panel of its own than the editor's label, and the row it marks is
     # the buffer the keystrokes are landing in. Lighting up both says where
     # the text goes and which of the open files it goes into, in one glance.
-    if focus == "editor": frameCell "tabs"
+    if focus.isEditor: frameCell "tabs"
 
     # Persist the session once everything that could have changed it has run.
     let tt = tabsText(buffers)
