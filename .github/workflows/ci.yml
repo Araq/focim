@@ -4,7 +4,8 @@ name: CI
 # the editor itself once per platform as the last step of `tests/tester.nim`.
 # Nothing here opens a window: the tests watch the drawing path through stub
 # relays, so they need no display and no X server. The workflow that ships a
-# binary -- and does open a window to check it -- is nightly.yml.
+# binary -- and does open a window to check it -- is release.yml, which runs
+# for tags only.
 
 on:
   push:

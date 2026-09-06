@@ -1,122 +1,107 @@
-name: focim nightly builds
+name: focim release builds
 
 # Builds focim -- the Focussed Nim Editor -- on a matrix of platforms and
-# publishes the binaries to this repo's GitHub Releases. Each run creates one
-# versioned release per commit (tag `nightly-<version>-<commit>`, version from
-# focim.nimble), so download URLs pin an exact revision. The test matrix lives
-# in ci.yml and is intentionally kept separate: this workflow ships a binary,
+# publishes the binaries to this repo's GitHub Releases. It runs for tags and
+# for nothing else: pushing `v0.8.0` builds the four platforms and publishes
+# one release named after that tag, so the download list holds the versions
+# that were released and grows only when one is. The test matrix lives in
+# ci.yml and is intentionally kept separate: this workflow ships a binary,
 # that one checks the code.
+#
+# To cut a release:
+#     git tag -a v0.8.0 -m 'focim 0.8.0' && git push origin v0.8.0
+# The tag's version has to be the one in focim.nimble, or `prepare` stops.
+# A tag can also be picked from the Actions tab ("Run workflow"), which
+# rebuilds it and replaces its assets.
 
 on:
-  workflow_dispatch: {}
-  schedule:
-    # 08:00 UTC daily.
-    - cron: '0 8 * * *'
   push:
-    branches: [ master ]
-    # On top of the daily build, a push cuts a nightly when ANY commit in the
-    # push carries the marker `[rebuild]` in its message -- enforced by the
-    # `prepare` job's `if:`. This keeps ordinary pushes off the 4-platform
-    # build while still giving an on-demand force, e.g.:
-    #   git commit --allow-empty -m 'publish focim [rebuild]'
-    # or just run this workflow manually from the Actions tab.
+    # Either spelling of a version tag: `v0.8.0` or a bare `0.8.0`.
+    tags: [ 'v*', '[0-9]*' ]
+  workflow_dispatch: {}
 
 # Publishing to this repo's own Releases only needs contents:write, so the
 # built-in GITHUB_TOKEN suffices.
 permissions:
   contents: write
 
-# Never let two nightly runs race on the same release.
+# Never let two runs race on the same release.
 concurrency:
-  group: focim-nightly
+  group: focim-release-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  # ── Resolve the version/commit and create the release ──────────────────────
+  # ── Resolve the version from the tag and create the release ────────────────
   prepare:
     runs-on: ubuntu-24.04
-    # Scheduled and manual runs always proceed; a push builds only when one of
-    # its commits opts in with the `[rebuild]` marker.
-    if: >-
-      github.event_name != 'push' ||
-      contains(join(github.event.commits.*.message), '[rebuild]')
     outputs:
       commit: ${{ steps.decide.outputs.commit }}
       short: ${{ steps.decide.outputs.short }}
       date: ${{ steps.decide.outputs.date }}
       version: ${{ steps.decide.outputs.version }}
       tag: ${{ steps.decide.outputs.tag }}
-      deploy: ${{ steps.decide.outputs.deploy }}
     steps:
       - name: Checkout
         uses: actions/checkout@v6
         with:
           fetch-depth: 1
 
-      - name: Determine version/commit and deploy decision
+      - name: Determine the tag and version
         id: decide
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
+          # Only a tag names a release; a manual run started on a branch would
+          # otherwise publish one under the branch's name.
+          if [ '${{ github.ref_type }}' != 'tag' ]; then
+            echo "This workflow builds tags. Push one (v0.8.0), or pick one in" >&2
+            echo "the Run workflow dropdown -- '${{ github.ref_name }}' is not a tag." >&2
+            exit 1
+          fi
+
+          tag='${{ github.ref_name }}'
+          version=${tag#v}
           commit='${{ github.sha }}'
           short=${commit:0:9}
           date=$(date -u +'%Y-%m-%d')
 
-          # The canonical version is the nimble file's, the same one `nimble
-          # install` reports.
-          version=$(grep -m1 '^version' focim.nimble | cut -d'"' -f2)
-          if [ -z "$version" ]; then
+          # The tag is what the release is called, but the version the editor
+          # and `nimble install` report is the nimble file's: the two saying
+          # different things is a mistake to stop for rather than to ship.
+          nimble=$(grep -m1 '^version' focim.nimble | cut -d'"' -f2)
+          if [ -z "$nimble" ]; then
             echo "Could not read version from focim.nimble" >&2
             exit 1
           fi
+          if [ "$version" != "$nimble" ]; then
+            echo "tag $tag is version $version, focim.nimble says $nimble" >&2
+            exit 1
+          fi
 
-          # One release per commit -- the tag carries the version and hash, so
-          # download URLs are versioned rather than rolling.
-          tag="nightly-$version-$short"
-
-          echo "commit=$commit"  >> "$GITHUB_OUTPUT"
-          echo "short=$short"    >> "$GITHUB_OUTPUT"
-          echo "date=$date"      >> "$GITHUB_OUTPUT"
+          echo "commit=$commit"   >> "$GITHUB_OUTPUT"
+          echo "short=$short"     >> "$GITHUB_OUTPUT"
+          echo "date=$date"       >> "$GITHUB_OUTPUT"
           echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=$tag"        >> "$GITHUB_OUTPUT"
+          echo "tag=$tag"         >> "$GITHUB_OUTPUT"
 
-          # Skip a scheduled run only when this exact commit is already fully
-          # published (all 4 platform assets present); a partial or failed
-          # earlier run has fewer assets and will retry. Manual and `[rebuild]`
-          # pushes always build -- uploads use --clobber, so re-publishing just
-          # refreshes the assets.
-          assets=0
-          if count=$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets | length' 2>/dev/null); then
-            assets=$count
-          fi
-          deploy=true
-          if [ "${{ github.event_name }}" = "schedule" ] && [ "$assets" -ge 4 ]; then
-            echo "$tag already has $assets assets; nothing new to build."
-            deploy=false
-          fi
-          echo "deploy=$deploy" >> "$GITHUB_OUTPUT"
-
-      - name: Create the release for this commit
-        if: steps.decide.outputs.deploy == 'true'
+      - name: Create the release for this tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           tag='${{ steps.decide.outputs.tag }}'
+          # A rerun of a tag that was already published keeps its release and
+          # replaces the assets -- the uploads below use --clobber.
           if ! gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$tag" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "focim ${{ steps.decide.outputs.version }} nightly (${{ steps.decide.outputs.date }})" \
-              --prerelease \
-              --notes "Nightly build of focim @ ${{ steps.decide.outputs.commit }} (version ${{ steps.decide.outputs.version }}, ${{ steps.decide.outputs.date }})."
+              --title "focim ${{ steps.decide.outputs.version }}" \
+              --notes "focim ${{ steps.decide.outputs.version }}, built from ${{ steps.decide.outputs.commit }}. The binaries are on their way: they appear here when the four platform jobs finish."
           fi
 
   # ── Build + package focim per platform ─────────────────────────────────────
   build:
     needs: prepare
-    if: needs.prepare.outputs.deploy == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -128,7 +113,7 @@ jobs:
     name: '${{ matrix.os }}-${{ matrix.cpu }}'
     runs-on: ${{ matrix.runner }}
     env:
-      ASSET: focim-${{ needs.prepare.outputs.version }}-${{ needs.prepare.outputs.short }}-${{ matrix.os }}_${{ matrix.cpu }}.${{ matrix.ext }}
+      ASSET: focim-${{ needs.prepare.outputs.version }}-${{ matrix.os }}_${{ matrix.cpu }}.${{ matrix.ext }}
     steps:
       - name: Set `core.autocrlf` to false
         run: |
@@ -193,10 +178,11 @@ jobs:
           cp README.md LICENSE "$stage/"
           cp doc/config.md "$stage/config.md"
 
-          cat > "$stage/NIGHTLY.txt" <<EOF
-          focim -- the Focussed Nim Editor, nightly build
-          commit:          ${{ needs.prepare.outputs.commit }}
+          cat > "$stage/RELEASE.txt" <<EOF
+          focim -- the Focussed Nim Editor
           version:         ${{ needs.prepare.outputs.version }}
+          tag:             ${{ needs.prepare.outputs.tag }}
+          commit:          ${{ needs.prepare.outputs.commit }}
           date:            ${{ needs.prepare.outputs.date }}
           platform:        ${{ matrix.os }}_${{ matrix.cpu }}
 
@@ -213,7 +199,7 @@ jobs:
           EOF
 
           if [ "${{ runner.os }}" = "macOS" ]; then
-            cat >> "$stage/NIGHTLY.txt" <<'MAC'
+            cat >> "$stage/RELEASE.txt" <<'MAC'
 
           focim.app is this same build as an application bundle, which is what
           carries the icon on macOS -- drag it to /Applications. The bare focim
@@ -296,7 +282,7 @@ jobs:
           SH
           chmod +x "$stage/install.sh"
 
-          cat >> "$stage/NIGHTLY.txt" <<'LINUX'
+          cat >> "$stage/RELEASE.txt" <<'LINUX'
 
           ./install.sh puts focim in the desktop menu with its icon: it copies
           the hicolor PNGs and share/applications/focim.desktop into your
@@ -469,11 +455,9 @@ jobs:
   # ── Fill in the release notes once every platform succeeded ────────────────
   finalize:
     needs: [ prepare, build ]
-    if: needs.prepare.outputs.deploy == 'true'
     runs-on: ubuntu-24.04
     env:
       V: ${{ needs.prepare.outputs.version }}
-      S: ${{ needs.prepare.outputs.short }}
     steps:
       - name: Update release notes
         env:
@@ -486,10 +470,10 @@ jobs:
           version ${V} · ${{ needs.prepare.outputs.date }}
 
           Downloads:
-          - Linux x86_64:   focim-${V}-${S}-linux_amd64.tar.xz
-          - Linux ARM64:    focim-${V}-${S}-linux_arm64.tar.xz
-          - macOS ARM64:    focim-${V}-${S}-macos_arm64.tar.xz
-          - Windows x86_64: focim-${V}-${S}-windows_amd64.zip
+          - Linux x86_64:   focim-${V}-linux_amd64.tar.xz
+          - Linux ARM64:    focim-${V}-linux_arm64.tar.xz
+          - macOS ARM64:    focim-${V}-macos_arm64.tar.xz
+          - Windows x86_64: focim-${V}-windows_amd64.zip
 
           Extract and run focim. On Linux, libX11.so.6 and libXft.so.2 are
           loaded at runtime and have to be present, and ./install.sh in the

@@ -39,11 +39,12 @@ buffer rather than on the machine.
 
 ## Download
 
-Nightly binaries for Linux (x86_64 and ARM64), macOS (ARM64) and Windows
-(x86_64) are published to
-[Releases](https://github.com/Araq/focim/releases) by
-[`nightly.yml`](.github/workflows/nightly.yml), one release per commit.
-Extract and run `focim`, optionally with a file to open.
+Binaries for Linux (x86_64 and ARM64), macOS (ARM64) and Windows (x86_64) are
+published to [Releases](https://github.com/Araq/focim/releases) by
+[`release.yml`](.github/workflows/release.yml), which builds a tag and nothing
+else: there is one release per version rather than one per commit. Extract and
+run `focim`, optionally with a file to open. To build the current source
+instead, see [Building](#building) below.
 
 Every archive carries the editor's icon in the form its desktop wants: the
 Windows `.exe` has it as a resource, the macOS archive holds `focim.app`

@@ -15,7 +15,7 @@ requires "nim >= 2.0.0"
 requires "https://github.com/nim-lang/uirelays >= 0.11.0"
 # One PNG in, every icon artifact a desktop application ships out. `icons`
 # below makes the build inputs with it and `bundle` hands the built editor to
-# the desktop; the nightly workflow uses it for both.
+# the desktop; the release workflow uses it for both.
 requires "https://github.com/Araq/iconbundler >= 0.1.0"
 # Neither is on the Nimble package list yet, hence the URLs.
 
