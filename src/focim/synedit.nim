@@ -2683,7 +2683,21 @@ proc tryParseHexColor(text: openArray[char]; start: int; c: var Color; consumed:
   consumed = n + 1
   result = true
 
+proc canDrawImages(): bool =
+  ## Whether this backend has the three image relays. They are optional and
+  ## they go together -- a backend that cannot load a picture cannot draw or
+  ## free one either -- and an optional relay nobody filled in is a nil proc,
+  ## so asking it for the picture is a segfault and not an empty answer. The
+  ## X11 driver fills in none of the three, which makes this the ordinary case
+  ## on Linux rather than a corner of one.
+  drawRelays.loadImage != nil and drawRelays.drawImage != nil and
+    drawRelays.freeImage != nil
+
 proc getCachedImage(s: var SynEdit; path: string): Image =
+  ## `Image(0)` when there is no way to load one; the caller draws its
+  ## placeholder for exactly that. Nothing reaches the cache in that case, so
+  ## `clear` never has an image to free that it could not free.
+  if not canDrawImages(): return Image(0)
   for e in s.imageCache:
     if e.path == path:
       return e.img

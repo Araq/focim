@@ -16,6 +16,9 @@ exec "nim c -r tests/configtest.nim"
 # points the config dir at a temporary one, so it touches nothing of yours.
 exec "nim c -r tests/configstoretest.nim"
 exec "nim c -r tests/markdowntest.nim"
+# And a markdown image line on a backend with no image relays -- which is what
+# X11 is, so this is the ordinary Linux case and not a corner of one.
+exec "nim c -r tests/mdimagetest.nim"
 # Bold and italics reach the drawing path through stub relays.
 exec "nim c -r tests/styletest.nim"
 # The word index needs no font until something draws with it.
