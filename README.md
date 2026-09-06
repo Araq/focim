@@ -39,12 +39,22 @@ buffer rather than on the machine.
 
 ## Download
 
-Binaries for Linux (x86_64 and ARM64), macOS (ARM64) and Windows (x86_64) are
-published to [Releases](https://github.com/Araq/focim/releases) by
+The current release is **0.8.2**. Extract the archive and run `focim`,
+optionally with a file to open.
+
+| Platform | Download |
+| --- | --- |
+| Linux x86\_64 | [focim-0.8.2-linux\_amd64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.2/focim-0.8.2-linux_amd64.tar.xz) |
+| Linux ARM64 | [focim-0.8.2-linux\_arm64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.2/focim-0.8.2-linux_arm64.tar.xz) |
+| macOS ARM64 | [focim-0.8.2-macos\_arm64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.2/focim-0.8.2-macos_arm64.tar.xz) |
+| Windows x86\_64 | [focim-0.8.2-windows\_amd64.zip](https://github.com/Araq/focim/releases/download/v0.8.2/focim-0.8.2-windows_amd64.zip) |
+
+Those four name the version they are, so they go on working once there is a
+newer one; [Releases](https://github.com/Araq/focim/releases) is where the
+newest always is. What puts it there is
 [`release.yml`](.github/workflows/release.yml), which builds a tag and nothing
-else: there is one release per version rather than one per commit. Extract and
-run `focim`, optionally with a file to open. To build the current source
-instead, see [Building](#building) below.
+else -- one release per version rather than one per commit. To build the
+current source instead, see [Building](#building) below.
 
 Every archive carries the editor's icon in the form its desktop wants: the
 Windows `.exe` has it as a resource, the macOS archive holds `focim.app`
