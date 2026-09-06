@@ -311,6 +311,13 @@ var gEditorCell = "editor"
   ## them cares about anything else the window knows. It cannot be the word
   ## "editor" any more -- after a split the panel in question may be
   ## `editor3`, and the window may well have no cell called `editor` at all.
+var gEditorSlot = 0
+  ## The seat that panel sits in. A buffer keeps one caret per panel, so
+  ## anything that puts a caret somewhere on the way to showing a file -- a
+  ## jump to a definition, a search hit, `open foo.nim:120` -- has to put it
+  ## in the seat the panel will read it out of. A global for the same reason
+  ## the cell is one, and beside it because the two are always wanted
+  ## together.
 var gTerminalCell = "terminal"
   ## The same for the terminal a command goes to.
 
@@ -532,12 +539,21 @@ proc tabsText(buffers: seq[BufferEntry]): string =
 
 proc openFile(buffers: var seq[BufferEntry]; font: Font;
               path: string; line, col: int): int =
-  ## Open a file or switch to it if already open. Returns the buffer index.
+  ## Open a file or switch to it if already open. Returns the buffer index,
+  ## which the caller makes `current` -- that, and nothing else, is what puts
+  ## the file in front of the panel the keystrokes are going to.
+  ##
+  ## The buffer is sat down in that panel's seat first, because the caret
+  ## belongs to a seat: a `gotoLine` into the one nobody is sitting in is a
+  ## jump the window never shows, and a file just made starts out in seat 0
+  ## whichever panel asked for it.
   for i, b in buffers:
     if b.path == path:
+      buffers[i].ed.enter gEditorSlot
       if line >= 0: buffers[i].ed.gotoLine(line, max(col, 0))
       return i
   buffers.add newBuffer(font, path)
+  buffers[^1].ed.enter gEditorSlot
   if line >= 0: buffers[^1].ed.gotoLine(line, max(col, 0))
   result = buffers.high
 
@@ -2172,6 +2188,11 @@ proc main =
   var tabsHadFocus = false
 
   var focus = gEditorCell
+  # The panel the keystrokes went to on the frame before this one. What tells
+  # a focus that moved to another panel -- where the file that panel was left
+  # showing is the one to go back to -- from a frame that merely opened a file
+  # in the panel already being typed in.
+  var lastActiveCell = ""
   # The panel the pointer is in, and its three buttons: a panel to the right,
   # a panel below, and away with this one. Drawn only while the pointer is in
   # the panel, the way the splitter grips are, so nothing is on screen until
@@ -2471,15 +2492,41 @@ proc main =
     # the one the buffer wears from here to the end of the frame. The panels
     # that are merely drawn borrow the buffer across their own `draw` and hand
     # it straight back; see the editor block.
+    #
+    # `current` and the active panel's `buf` are one fact written down twice,
+    # and the panel is the copy that is written *to*: a file opened anywhere
+    # -- the explorer, `open`, a Ctrl+click into another file, a search that
+    # ran on through the buffers -- moves `current` and has nothing else to
+    # remember. The panel is read back only when the focus has moved to a
+    # different one, which is the one moment it knows something `current` does
+    # not: which file was left in it.
     for i in 0 ..< editors.len:
       if editors[i].cell == focus: activeEditor = i
     if activeEditor >= editors.len: activeEditor = 0
     if editors.len > 0:
       gEditorCell = editors[activeEditor].cell
-      let b = buffers.indexOfId(editors[activeEditor].buf)
-      if b >= 0: current = b
+      gEditorSlot = editors[activeEditor].slot
+      if gEditorCell != lastActiveCell:
+        # By cell and not by index: panels come and go with the layout, so the
+        # index of the one being typed in moves without the focus going
+        # anywhere. A panel whose file has since been closed keeps `current`
+        # as it stands rather than showing nothing.
+        lastActiveCell = gEditorCell
+        let b = buffers.indexOfId(editors[activeEditor].buf)
+        if b >= 0: current = b
       editors[activeEditor].buf = buffers[current].id
       buffers[current].ed.enter editors[activeEditor].slot
+    template showInActivePanel() =
+      ## The same again, for a file picked further down this frame. The bit
+      ## that matters is the seat: the panel draws `buffers[current]` below
+      ## whatever `current` has become by then, so a buffer still sitting in
+      ## some other panel's seat is drawn at that panel's line for one frame
+      ## before the top of the next one puts it right. `openFile` takes the
+      ## seat itself, which leaves the tab list -- the one place that makes a
+      ## buffer current without opening it.
+      if editors.len > 0:
+        editors[activeEditor].buf = buffers[current].id
+        buffers[current].ed.enter editors[activeEditor].slot
     for i in 0 ..< terms.len:
       if terms[i].cell == focus: activeTerm = i
     if activeTerm >= terms.len: activeTerm = 0
@@ -2661,6 +2708,7 @@ proc main =
         let idx = tabs.ed.currentLine
         if idx < buffers.len:
           current = idx
+          showInActivePanel()
           focus = gEditorCell
         e = default Event
       elif e.key == KeyEnter and focus == "explorer":
@@ -2785,9 +2833,7 @@ proc main =
         current = idx
         # The tab list picks the file for the panel the keystrokes were going
         # to, and leaves the other panels showing what they were showing.
-        if editors.len > 0:
-          editors[activeEditor].buf = buffers[current].id
-          buffers[current].ed.enter editors[activeEditor].slot
+        showInActivePanel()
         focus = gEditorCell
 
     # Explorer -- flat directory listing, line 0 is the path/filter field
