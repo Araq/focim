@@ -1,6 +1,6 @@
 # Package
 
-version       = "0.8.2"
+version       = "0.8.4"
 author        = "Araq"
 description   = "Focim -- the Focussed Nim Editor: a code editor with an integrated terminal, laid out and colored by a config file that is one of its own tabs"
 license       = "MIT"

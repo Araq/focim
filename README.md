@@ -39,15 +39,15 @@ buffer rather than on the machine.
 
 ## Download
 
-The current release is **0.8.2**. Extract the archive and run `focim`,
+The current release is **0.8.4**. Extract the archive and run `focim`,
 optionally with a file to open.
 
 | Platform | Download |
 | --- | --- |
-| Linux x86\_64 | [focim-0.8.2-linux\_amd64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.2/focim-0.8.2-linux_amd64.tar.xz) |
-| Linux ARM64 | [focim-0.8.2-linux\_arm64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.2/focim-0.8.2-linux_arm64.tar.xz) |
-| macOS ARM64 | [focim-0.8.2-macos\_arm64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.2/focim-0.8.2-macos_arm64.tar.xz) |
-| Windows x86\_64 | [focim-0.8.2-windows\_amd64.zip](https://github.com/Araq/focim/releases/download/v0.8.2/focim-0.8.2-windows_amd64.zip) |
+| Linux x86\_64 | [focim-0.8.4-linux\_amd64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.4/focim-0.8.4-linux_amd64.tar.xz) |
+| Linux ARM64 | [focim-0.8.4-linux\_arm64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.4/focim-0.8.4-linux_arm64.tar.xz) |
+| macOS ARM64 | [focim-0.8.4-macos\_arm64.tar.xz](https://github.com/Araq/focim/releases/download/v0.8.4/focim-0.8.4-macos_arm64.tar.xz) |
+| Windows x86\_64 | [focim-0.8.4-windows\_amd64.zip](https://github.com/Araq/focim/releases/download/v0.8.4/focim-0.8.4-windows_amd64.zip) |
 
 Those four name the version they are, so they go on working once there is a
 newer one; [Releases](https://github.com/Araq/focim/releases) is where the
