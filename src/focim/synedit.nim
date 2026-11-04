@@ -341,7 +341,7 @@ proc setRenderFlag*(s: var SynEdit; flag: RenderFlag; enabled = true) =
 # Gap buffer access
 # ---------------------------------------------------------------------------
 
-proc getCell(s: SynEdit; i: Natural): Cell {.inline.} =
+proc getCell*(s: SynEdit; i: Natural): Cell {.inline.} =
   if i < s.front.len:
     s.front[i]
   else:
@@ -3699,6 +3699,11 @@ proc draw*(s: var SynEdit; e: Event; area: Rect; focused: bool): EditAction =
           if text.len > 0:
             putClipboardText(text)
             s.removeSelectedText()
+          else:
+            # Nothing selected: cut the whole current line (with its trailing
+            # newline), the CUA/Sublime reflex -- so C-x always cuts something.
+            putClipboardText(s.getLineText(s.currentLine.int) & "\n")
+            s.deleteLine()
       of KeyV:
         if ctrl:
           let text = getClipboardText()
