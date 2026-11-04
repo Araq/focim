@@ -27,7 +27,7 @@ var
   blits = 0
 
 proc stubBlit(pixels: ptr UncheckedArray[uint32]; w, h: int;
-              dst: coords.Rect): bool {.nimcall.} =
+              dst: coords.Rect; format: screen.RGBAFormat): bool {.nimcall.} =
   inc blits
   blitW = w
   blitH = h
