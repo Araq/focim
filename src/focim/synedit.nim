@@ -1096,9 +1096,40 @@ proc styleMarkdownLine(s: var SynEdit; lineStart, lineEnd, last: int) =
   if lineEnd <= last:
     s.setCellStyle(lineEnd, TokenClass.None)
 
+# An outside highlighter can style the body of fenced code blocks. SynEdit knows
+# nothing about the engine: both relays are nil by default, and a language the
+# engine does not claim stays with the tokenizers in this file.
+
+type
+  StyleRun* = tuple[first, last: int; tc: TokenClass]
+    ## Byte offsets into the `code` the styler was given, `last` included.
+
+var
+  codeStylerHandles*: proc (lang: string): bool {.nimcall.}
+  codeStyler*: proc (lang, code: string; runs: var seq[StyleRun]) {.nimcall.}
+
+proc usesCodeStyler(lang: string): bool =
+  codeStyler != nil and codeStylerHandles != nil and lang.len > 0 and
+    codeStylerHandles(lang.toLowerAscii)
+
+proc styleBlockBody(s: var SynEdit; lang: string; a, b: int) =
+  ## Style the cells `a ..< b`, the body of a code block.
+  if a >= b: return
+  var code = newStringOfCap(b - a)
+  for j in a ..< b: code.add s[j]
+  var runs: seq[StyleRun]
+  codeStyler(lang.toLowerAscii, code, runs)
+  for j in a ..< b: s.setCellStyle(j, TokenClass.None)
+  for r in runs:
+    for k in r.first .. min(r.last, code.high):
+      s.setCellStyle(a + k, r.tc)
+
 proc highlightMarkdown(s: var SynEdit; first, last: int) =
   var insideFence = false
   var fenceLang = langNone
+  var fenceName = ""
+  var fenceStyled = false
+  var fenceBody = first
   var pos = first
   while pos > 0 and s[pos-1] != '\L': dec pos
   while pos <= last:
@@ -1118,9 +1149,16 @@ proc highlightMarkdown(s: var SynEdit; first, last: int) =
       if rest.len > 0 and not insideFence:
         fenceLang = strToLanguage(rest)
         insideFence = true
+        fenceName = rest
+        fenceStyled = usesCodeStyler(rest)
+        fenceBody = lineEnd + 1
       elif insideFence:
+        if fenceStyled: s.styleBlockBody(fenceName, fenceBody, lineStart)
         insideFence = false
+        fenceStyled = false
         fenceLang = langNone
+    elif insideFence and fenceStyled:
+      discard                            # styled as a whole at the closing fence
     elif insideFence and fenceLang != langNone:
       var g: GeneralTokenizer
       g.buf = addr s
@@ -1141,6 +1179,8 @@ proc highlightMarkdown(s: var SynEdit; first, last: int) =
       s.styleMarkdownLine(lineStart, lineEnd, last)
 
     pos = lineEnd + 1
+  if insideFence and fenceStyled:        # still being typed: no closing fence
+    s.styleBlockBody(fenceName, fenceBody, last + 1)
 
 proc highlight(s: var SynEdit; first, last: int; initialState: TokenClass) =
   # Text a program colored itself is not the highlighter's to guess at. Below
