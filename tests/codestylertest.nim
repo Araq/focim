@@ -1,6 +1,6 @@
-## The code styler relay: a claimed fence goes to the styler, in whole, and
+## `markdownLangs`: a fence in the table goes to its styler, in whole, and
 ## anything else stays with the tokenizers in synedit.
-import std/strutils
+import std/tables
 import uirelays/[screen, coords, input]
 import focim/[synedit, theme]
 
@@ -32,24 +32,22 @@ clipboardRelays = ClipboardRelays(
 
 var seen: seq[string]
 
-proc install() =
-  codeStylerHandles = proc (lang: string): bool = lang == "abc"
-  codeStyler = proc (lang, code: string; runs: var seq[StyleRun]) =
-    seen.add code
-    runs.add (0, 2, TokenClass.Keyword)
+proc abc(code: string; runs: var seq[StyleRun]) =
+  seen.add code
+  runs.add StyleRun(first: 0, last: 2, tc: TokenClass.Keyword)
 
-proc styled(text: string): SynEdit =
+proc styled(text: string; withAbc = true): SynEdit =
   var m: FontMetrics
   result = createSynEdit(openFont("", 16, m), defaultTheme())
   result.lang = langMarkdown
+  if withAbc: result.markdownLangs["abc"] = abc
   result.setText(text)
   result.render(rect(0, 0, 800, 600), showCursor = false)
 
-block nilRelays:
-  let s = styled("```abc\nabc def\n```\n")
+block emptyTable:
+  let s = styled("```abc\nabc def\n```\n", withAbc = false)
+  doAssert seen.len == 0
   doAssert s.tokenClassAt(7) != TokenClass.Keyword
-
-install()
 
 block claimed:
   let text = "```abc\nabc def\nsecond\n```\n"

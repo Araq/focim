@@ -45,6 +45,7 @@ import uirelays/[coords, screen, input]
 import ./theme
 import ./langs/markdown
 import std/strutils
+import std/tables
 export theme
 export markdown
 
@@ -212,6 +213,11 @@ type
                         ## that a panel coming back to a buffer that changed
                         ## while it was away knows to count its line again
 
+  StyleRun* = object
+    ## Byte offsets into the `code` a styler was given, `last` included.
+    first*, last*: int
+    tc*: TokenClass
+
   SynEdit* = object
     # Gap buffer
     front, back: seq[Cell]
@@ -253,6 +259,10 @@ type
     # Text
     tabSize*: int
     lang*: SourceLanguage
+    markdownLangs*: Table[string, proc (code: string; runs: var seq[StyleRun])]
+      ## Outside highlighters for fenced code blocks, by language in lower case.
+      ## Each gets a block's whole body. A language without an entry stays with
+      ## the tokenizers in this file.
     changed: bool
     readOnly*: int                  ## -1 = fully editable;
                                     ## >= 0 = positions <= readOnly are protected
@@ -1096,21 +1106,8 @@ proc styleMarkdownLine(s: var SynEdit; lineStart, lineEnd, last: int) =
   if lineEnd <= last:
     s.setCellStyle(lineEnd, TokenClass.None)
 
-# An outside highlighter can style the body of fenced code blocks. SynEdit knows
-# nothing about the engine: both relays are nil by default, and a language the
-# engine does not claim stays with the tokenizers in this file.
-
-type
-  StyleRun* = tuple[first, last: int; tc: TokenClass]
-    ## Byte offsets into the `code` the styler was given, `last` included.
-
-var
-  codeStylerHandles*: proc (lang: string): bool {.nimcall.}
-  codeStyler*: proc (lang, code: string; runs: var seq[StyleRun]) {.nimcall.}
-
-proc usesCodeStyler(lang: string): bool =
-  codeStyler != nil and codeStylerHandles != nil and lang.len > 0 and
-    codeStylerHandles(lang.toLowerAscii)
+proc usesCodeStyler(s: SynEdit; lang: string): bool =
+  lang.toLowerAscii in s.markdownLangs
 
 proc styleBlockBody(s: var SynEdit; lang: string; a, b: int) =
   ## Style the cells `a ..< b`, the body of a code block.
@@ -1118,7 +1115,7 @@ proc styleBlockBody(s: var SynEdit; lang: string; a, b: int) =
   var code = newStringOfCap(b - a)
   for j in a ..< b: code.add s[j]
   var runs: seq[StyleRun]
-  codeStyler(lang.toLowerAscii, code, runs)
+  s.markdownLangs[lang.toLowerAscii](code, runs)
   for j in a ..< b: s.setCellStyle(j, TokenClass.None)
   for r in runs:
     for k in r.first .. min(r.last, code.high):
@@ -1150,7 +1147,7 @@ proc highlightMarkdown(s: var SynEdit; first, last: int) =
         fenceLang = strToLanguage(rest)
         insideFence = true
         fenceName = rest
-        fenceStyled = usesCodeStyler(rest)
+        fenceStyled = s.usesCodeStyler(rest)
         fenceBody = lineEnd + 1
       elif insideFence:
         if fenceStyled: s.styleBlockBody(fenceName, fenceBody, lineStart)
