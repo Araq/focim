@@ -108,6 +108,34 @@ equals("a directory the command was typed in decides a tie",
        found("hastur", @[proj / "icons"]), "icons/hastur.rc")
 
 # ---------------------------------------------------------------------------
+echo "two projects with a file of the same name:"
+# ---------------------------------------------------------------------------
+
+file "nim/nim.nimble", "# a package\n"
+file "nim/lib/pure/strutils.nim"
+file "nimony/nimony.nimble", "# a package\n"
+file "nimony/lib/std/strutils.nim"
+file "nimony/src/nimony/sem.nim"
+
+proc inTwo(arg: string; prefer: seq[string]): string =
+  var truncated = false
+  result = findInTrees(@[root / "nim", root / "nimony"], prefer, arg, truncated)
+  if result.startsWith(root & DirSep):
+    result = result[root.len + 1 .. ^1].replace(DirSep, '/')
+
+equals("the project one is standing in wins over a tab open in another",
+       inTwo("strutils.nim", @[root / "nimony" / "src" / "nimony",
+                               root / "nim" / "lib" / "pure"]),
+       "nimony/lib/std/strutils.nim")
+equals("and the other way round",
+       inTwo("strutils.nim", @[root / "nim",
+                               root / "nimony" / "lib" / "std"]),
+       "nim/lib/pure/strutils.nim")
+equals("a tab decides when where one stands is in neither project",
+       inTwo("strutils", @[root / "elsewhere", root / "nimony" / "src"]),
+       "nimony/lib/std/strutils.nim")
+
+# ---------------------------------------------------------------------------
 echo "the same question asked of one directory:"
 # ---------------------------------------------------------------------------
 

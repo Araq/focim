@@ -25,8 +25,11 @@
 ## 1. how exactly the name matches -- the whole path tail, then the file name,
 ##    then the file name without its extension, then a prefix of it, then a
 ##    fragment of it;
-## 2. how near it is to where the command was typed -- the directory it was
-##    typed against, then the directory of every open tab;
+## 2. how near it is to where the command was typed -- how many directories
+##    one has to climb out of the one it was typed against before the file is
+##    below, then the same for the directory of every open tab, so the
+##    `strutils.nim` of the project one is standing in beats the one of another
+##    project that merely happens to be open in a tab;
 ## 3. what kind of thing it is: `.nim` before `.c` before `.md` before
 ##    something an editor has no business with, and a file before a directory;
 ## 4. how shallow it is, so `src/hexer/xelim.nim` beats a vendored copy of it
@@ -185,12 +188,13 @@ type
     path: string
     cls: int        ## how the name matched
     kind: int       ## what it is worth opening as, per `SourceExtensions`
-    dirCls: int     ## how near its directory is to where this was typed
+    near: seq[int]  ## how far it is from each of `prefer`, see `climb`
     depth: int      ## how far down the tree it is
 
 proc better(a, b: Match): bool =
   if a.cls != b.cls: return a.cls < b.cls
-  if a.dirCls != b.dirCls: return a.dirCls < b.dirCls
+  for i in 0 ..< min(a.near.len, b.near.len):
+    if a.near[i] != b.near[i]: return a.near[i] < b.near[i]
   if a.kind != b.kind: return a.kind < b.kind
   if a.depth != b.depth: return a.depth < b.depth
   result = a.path < b.path
@@ -199,10 +203,29 @@ proc depthOf(path: string): int =
   for c in path:
     if isSep(c): inc result
 
-proc dirClass(dir: string; prefer: seq[string]): int =
-  for i, d in prefer:
-    if d == dir: return i
-  result = prefer.len
+proc components(path: string): seq[string] =
+  result = @[]
+  var start = 0
+  for i in 0 .. path.len:
+    if i == path.len or isSep(path[i]):
+      if i > start: result.add path[start ..< i]
+      start = i + 1
+
+proc climb(fromDir: seq[string]; dir: seq[string]): int =
+  ## How many directories one climbs out of `fromDir` before `dir` is below:
+  ## 0 for `fromDir` itself and anything inside it, 1 for a sibling, and a lot
+  ## for another project altogether. Climbing is what "far" means; the descent
+  ## afterwards is what `depth` already says.
+  var common = 0
+  while common < fromDir.len and common < dir.len and
+        fromDir[common] == dir[common]:
+    inc common
+  result = fromDir.len - common
+
+proc nearness(dir: string; prefer: seq[seq[string]]): seq[int] =
+  let c = components(dir)
+  result = newSeq[int](prefer.len)
+  for i, p in prefer: result[i] = climb(p, c)
 
 proc skipDir(name: string): bool {.inline.} =
   ## A build directory holds a copy of everything and none of it is source.
@@ -218,7 +241,8 @@ proc findInTrees*(roots, prefer: seq[string]; arg: string;
                   truncated: var bool; recurse = true): string =
   ## The best file (or directory) under `roots` that `arg` names, or "".
   ## `prefer` is where the command was typed and which directories are already
-  ## open, most interesting first: it decides ties, not matches. `truncated` is
+  ## open, most interesting first: it decides ties, not matches -- nearness to
+  ## the first of them before nearness to the second, and so on. `truncated` is
   ## set when the walk stopped at `MaxVisited` -- an empty answer means
   ## something else then, and the caller can say so.
   ##
@@ -231,6 +255,8 @@ proc findInTrees*(roots, prefer: seq[string]; arg: string;
   if arg.len == 0: return ""
   let bare = isBareName(arg)
   var best = Match(cls: -1)
+  var preferParts: seq[seq[string]] = @[]
+  for p in prefer: preferParts.add components(normDir(p))
   var visited = 0
   var walked: seq[string] = @[]
   for r in roots:
@@ -249,7 +275,8 @@ proc findInTrees*(roots, prefer: seq[string]; arg: string;
     var stack = @[root]
     while stack.len > 0:
       let dir = stack.pop()
-      let dcls = dirClass(dir, prefer)
+      var near: seq[int] = @[]
+      var nearDone = false
       try:
         for kind, p in walkDir(dir):
           inc visited
@@ -268,8 +295,13 @@ proc findInTrees*(roots, prefer: seq[string]; arg: string;
             continue
           let cls = matchClass(p, arg, bare)
           if cls < 0: continue
+          if not nearDone:
+            # Only for a directory that has a match in it at all: most of them
+            # do not, and this is the one thing here that allocates.
+            near = nearness(dir, preferParts)
+            nearDone = true
           let m = Match(path: p, cls: cls, kind: kindRank(p, isDir),
-                        dirCls: dcls, depth: depthOf(p))
+                        near: near, depth: depthOf(p))
           if best.cls < 0 or m.better(best): best = m
       except CatchableError:
         discard

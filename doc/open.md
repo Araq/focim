@@ -15,20 +15,31 @@ o hexer            -> the explorer, showing src/hexer
 
 A relative path means what it would mean where it was typed: in the terminal,
 relative to the directory the terminal is in; on the prompt, relative to the
-file being edited. An absolute path is itself and nothing is guessed about it.
+file being edited (or the directory focim was started in, for a buffer with no
+file). That same directory is "where the command was typed" below, and decides
+which of two files is nearer. An absolute path is itself and nothing is
+guessed about it.
 
 ## Three questions, cheapest first
 
 Each is asked only because the one before it said no.
 
-1. **The path as given**, against the directory the command was typed in and
-   the directory of every open tab. This is the file one was just looking at,
-   and it costs a `fileExists`.
-2. **The listings of those same directories**, for a name with pieces missing.
-   One `walkDir` each.
-3. **The project those directories are in**, walked.
+1. **The path as given**, against the directory the command was typed in.
+   This is the file one was just looking at, and it costs a `fileExists`.
+2. **The listing of that directory**, for a name with pieces missing. One
+   `walkDir`.
+3. **The projects of that directory and of every open tab**, walked, and
+   ranked by nearness to where the command was typed before nearness to any
+   tab.
 
-The first two look at a handful of directories and answer instantly. What they
+The first two only look where the command was typed: a tab open in another
+project must not answer before the project one is standing in was asked. In a
+Nimony checkout `o strutils.nim` means Nimony's `lib/std/strutils.nim`, even
+with Nim's `lib/pure` open in a tab. (The open tabs' own directories get the
+cheap questions too, but only after the walk found nothing -- a tab in a
+directory too big to walk is still a place to look.)
+
+The first two answer instantly. What they
 cannot answer is a project that has any shape to it: with only
 `nimony/README.md` open, `xelim.nim` is three directories away in `src/hexer/`
 and no list of open directories will ever hold it. That is what the walk is
@@ -74,8 +85,11 @@ In this order:
    then a prefix of the name, then a fragment from the middle of it. Only a
    *bare* name is guessed at that far: `sub/dir/thing` was meant to be a path,
    and answering it with a file from somewhere else would be a surprise.
-2. **How near it is to where the command was typed** -- that directory first,
-   then the directory of every open tab, in tab order.
+2. **How near it is to where the command was typed** -- how many directories
+   one has to climb out of that directory before the file is below it: none
+   for anything inside it, one for a sibling, many for another project. Ties
+   there are decided the same way by the directory of every open tab, in tab
+   order.
 3. **What kind of thing it is.** `.nim` before `.c` before `.md` before
    something an editor has no business with, and a file before a directory.
    This is what makes `o hastur` mean `src/hastur.nim` and not

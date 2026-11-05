@@ -1428,39 +1428,53 @@ proc findFileSmart(buffers: seq[BufferEntry]; base, arg: string;
   ## Three questions, cheapest first, each asked only because the one before it
   ## said no:
   ##
-  ## 1. the path as given, against the directory the command was typed in and
-  ##    the directory of every open tab -- nimedit's `findFile`;
-  ## 2. the *listings* of those same directories, for a name with pieces
-  ##    missing -- nimedit's `findFileAbbrev`, one `walkDir` each;
-  ## 3. the projects those directories are in, walked.
+  ## 1. the path as given, against the directory the command was typed in --
+  ##    nimedit's `findFile`;
+  ## 2. the *listing* of that directory, for a name with pieces missing --
+  ##    nimedit's `findFileAbbrev`, one `walkDir`;
+  ## 3. the projects that directory and the directory of every open tab are
+  ##    in, walked, ranked by nearness to where the command was typed first
+  ##    and to the open tabs after that.
   ##
-  ## The first two look at a handful of directories and answer instantly. What
-  ## they cannot answer is a project that has any shape to it: with only
-  ## `nimony/README.md` open, `xelim.nim` is three directories away in
-  ## `src/hexer/` and no list of open directories will ever hold it. That is
-  ## what the walk is for, and why it is last -- it is the only step that costs
-  ## anything, and by the time it runs the cheap answers have all said no.
+  ## The first two only ever look where the command was typed: a tab open in
+  ## another project must not answer before the project one is standing in has
+  ## been asked -- in a Nimony checkout `o strutils.nim` means Nimony's, even
+  ## with Nim's `lib/pure` open in a tab. What the cheap steps cannot answer is
+  ## a project that has any shape to it: with only `nimony/README.md` open,
+  ## `xelim.nim` is three directories away in `src/hexer/`. That is what the
+  ## walk is for, and why it is last -- it is the only step that costs
+  ## anything.
   ##
-  ## Steps 2 and 3 are the same ranking over a different scope, so the quick
-  ## search and the thorough one can never disagree about which of two files
-  ## was meant. Directories are found too; the caller decides what to do with
-  ## one.
+  ## Steps 2 and 3 are the same ranking over a different scope. The tab
+  ## directories are asked the cheap questions too, but only once the walk has
+  ## said no -- a tab in a directory too big to walk is still a place to look.
+  ## Directories are found too; the caller decides what to do with one.
   truncated = false
   if arg.len == 0: return ""
   let e = expandTilde(arg)
   if isAbsolute(e):
     return if fileExists(e) or dirExists(e): e else: ""
   let dirs = searchDirs(buffers, base)
-  for d in dirs:
+  let here = if base.len > 0 and dirs.len > 0 and dirs[0] == normDir(base):
+               @[dirs[0]]
+             else: @[]
+  for d in here:
     let p = d / e
     if fileExists(p) or dirExists(p): return p
-  result = findInTrees(dirs, dirs, e, truncated, recurse = false)
+  result = findInTrees(here, dirs, e, truncated, recurse = false)
   if result.len > 0: return
   var roots: seq[string] = @[]
   for d in dirs:
     let r = searchRoot(d)
     if r.len > 0 and r notin roots: roots.add r
   result = findInTrees(roots, dirs, e, truncated)
+  if result.len > 0: return
+  let walkTruncated = truncated
+  for d in dirs:
+    let p = d / e
+    if fileExists(p) or dirExists(p): return p
+  result = findInTrees(dirs, dirs, e, truncated, recurse = false)
+  truncated = truncated or walkTruncated
 
 proc runOpenCommand(act: TermAction; base: string;
                     buffers: var seq[BufferEntry]; current: var int;
