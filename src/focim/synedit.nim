@@ -45,6 +45,7 @@ import uirelays/[coords, screen, input]
 import ./theme
 import ./langs/markdown
 import std/strutils
+import std/tables
 export theme
 export markdown
 
@@ -212,6 +213,11 @@ type
                         ## that a panel coming back to a buffer that changed
                         ## while it was away knows to count its line again
 
+  StyleRun* = object
+    ## Byte offsets into the `code` a styler was given, `last` included.
+    first*, last*: int
+    tc*: TokenClass
+
   SynEdit* = object
     # Gap buffer
     front, back: seq[Cell]
@@ -253,6 +259,10 @@ type
     # Text
     tabSize*: int
     lang*: SourceLanguage
+    markdownLangs*: Table[string, proc (code: string; runs: var seq[StyleRun])]
+      ## Outside highlighters for fenced code blocks, by language in lower case.
+      ## Each gets a block's whole body. A language without an entry stays with
+      ## the tokenizers in this file.
     changed: bool
     readOnly*: int                  ## -1 = fully editable;
                                     ## >= 0 = positions <= readOnly are protected
@@ -1096,9 +1106,27 @@ proc styleMarkdownLine(s: var SynEdit; lineStart, lineEnd, last: int) =
   if lineEnd <= last:
     s.setCellStyle(lineEnd, TokenClass.None)
 
+proc usesCodeStyler(s: SynEdit; lang: string): bool =
+  lang.toLowerAscii in s.markdownLangs
+
+proc styleBlockBody(s: var SynEdit; lang: string; a, b: int) =
+  ## Style the cells `a ..< b`, the body of a code block.
+  if a >= b: return
+  var code = newStringOfCap(b - a)
+  for j in a ..< b: code.add s[j]
+  var runs: seq[StyleRun]
+  s.markdownLangs[lang.toLowerAscii](code, runs)
+  for j in a ..< b: s.setCellStyle(j, TokenClass.None)
+  for r in runs:
+    for k in r.first .. min(r.last, code.high):
+      s.setCellStyle(a + k, r.tc)
+
 proc highlightMarkdown(s: var SynEdit; first, last: int) =
   var insideFence = false
   var fenceLang = langNone
+  var fenceName = ""
+  var fenceStyled = false
+  var fenceBody = first
   var pos = first
   while pos > 0 and s[pos-1] != '\L': dec pos
   while pos <= last:
@@ -1118,9 +1146,16 @@ proc highlightMarkdown(s: var SynEdit; first, last: int) =
       if rest.len > 0 and not insideFence:
         fenceLang = strToLanguage(rest)
         insideFence = true
+        fenceName = rest
+        fenceStyled = s.usesCodeStyler(rest)
+        fenceBody = lineEnd + 1
       elif insideFence:
+        if fenceStyled: s.styleBlockBody(fenceName, fenceBody, lineStart)
         insideFence = false
+        fenceStyled = false
         fenceLang = langNone
+    elif insideFence and fenceStyled:
+      discard                            # styled as a whole at the closing fence
     elif insideFence and fenceLang != langNone:
       var g: GeneralTokenizer
       g.buf = addr s
@@ -1141,6 +1176,8 @@ proc highlightMarkdown(s: var SynEdit; first, last: int) =
       s.styleMarkdownLine(lineStart, lineEnd, last)
 
     pos = lineEnd + 1
+  if insideFence and fenceStyled:        # still being typed: no closing fence
+    s.styleBlockBody(fenceName, fenceBody, last + 1)
 
 proc highlight(s: var SynEdit; first, last: int; initialState: TokenClass) =
   # Text a program colored itself is not the highlighter's to guess at. Below

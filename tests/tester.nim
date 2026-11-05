@@ -16,6 +16,7 @@ exec "nim c -r tests/configtest.nim"
 # points the config dir at a temporary one, so it touches nothing of yours.
 exec "nim c -r tests/configstoretest.nim"
 exec "nim c -r tests/markdowntest.nim"
+exec "nim c -r tests/codestylertest.nim"
 # And a markdown image line on a backend with no image relays -- which is what
 # X11 is, so this is the ordinary Linux case and not a corner of one.
 exec "nim c -r tests/mdimagetest.nim"
