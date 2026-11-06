@@ -63,6 +63,8 @@ exec "nim c -r tests/tablisttest.nim"
 exec "nim c -r tests/viewtest.nim"
 # The names panels go by, and the list of them the layout dictates.
 exec "nim c -r tests/panelstest.nim"
+# The branches panel's git calls, against a repository made for the purpose.
+exec "nim c -r tests/gitbranchestest.nim"
 
 # The editor itself, once, with the platform's default backend -- the one
 # thing here that pulls in a driver, and so the one thing that would notice a
