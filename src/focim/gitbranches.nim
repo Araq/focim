@@ -79,3 +79,84 @@ proc deleteBranch*(root, name: string; error: var string): bool =
   let r = git(root, ["branch", "-d", name])
   result = r.code == 0
   error = if result: "" else: message(r.output)
+
+# ---------------------------------------------------------------------------
+# What a branch is about -- the files it changed since it left the default
+# branch, and where in each of them it first did
+# ---------------------------------------------------------------------------
+
+type
+  Touched* = object
+    path*: string   ## absolute
+    line*: int      ## 1-based: the first line the branch changed in it
+
+proc baseRef*(root: string): string =
+  ## The branch everything else is measured against: the remote's default if
+  ## the repository says which one that is, else a local `main` or `master`.
+  ## "" when there is none of them, which leaves nothing to compare with.
+  let r = git(root, ["rev-parse", "--abbrev-ref", "origin/HEAD"])
+  if r.code == 0 and r.output.strip.len > 0 and r.output.strip != "origin/HEAD":
+    return r.output.strip
+  for name in ["main", "master"]:
+    if git(root, ["rev-parse", "--verify", "-q", "refs/heads/" & name]).code == 0:
+      return name
+  result = ""
+
+proc firstChangedLines(diff: string): seq[(string, int)] =
+  ## From a `-U0 --no-prefix` diff: every file it changes, with the new-side
+  ## line of its first hunk. A file the branch deleted (`+++ /dev/null`) has
+  ## no new side and is left out; so is a binary one, which has no hunks.
+  result = @[]
+  var cur = ""
+  var seen = false
+  for l in diff.splitLines:
+    if l.startsWith("+++ "):
+      cur = l[4 .. ^1]
+      seen = cur == "/dev/null"
+    elif l.startsWith("@@ ") and not seen and cur.len > 0:
+      # "@@ -a,b +c,d @@": c is where it starts on the branch's side; a hunk
+      # that only deletes says the line before the gap, and 0 at the top.
+      let plus = l.find(" +")
+      var line = 0
+      if plus >= 0:
+        var i = plus + 2
+        while i < l.len and l[i] in {'0'..'9'}:
+          line = line * 10 + (ord(l[i]) - ord('0'))
+          inc i
+      result.add (cur, max(line, 1))
+      seen = true
+
+proc touchedFiles*(root: string; limit = 30): seq[Touched] =
+  ## The files the checked out branch changed since it forked from
+  ## `baseRef`, newest commit first, at most `limit` of them.
+  ##
+  ## The set comes from the three-dot diff, which is against the merge-base:
+  ## what landed on the default branch since the fork is not this branch's
+  ## doing, and a file changed and changed back again is not changed. The
+  ## order comes from the log, because the cap has to cut the files nobody
+  ## has looked at in a while and not the ones late in the alphabet.
+  result = @[]
+  let base = baseRef(root)
+  if base.len == 0: return
+  let d = git(root, ["-c", "core.quotePath=false", "diff", "-U0", "--no-color",
+                     "--no-ext-diff", "--no-prefix", base & "...HEAD"])
+  if d.code != 0: return
+  let changed = firstChangedLines(d.output)
+  if changed.len == 0: return
+  let log = git(root, ["-c", "core.quotePath=false", "log", "--name-only",
+                       "--format=", base & "..HEAD"])
+  var order: seq[string] = @[]
+  if log.code == 0:
+    for l in log.output.splitLines:
+      if l.len > 0 and l notin order: order.add l
+  # Whatever the log did not name -- it always does, but a diff and a log are
+  # two questions -- goes after it, in the diff's order.
+  for (p, _) in changed:
+    if p notin order: order.add p
+  for p in order:
+    if result.len >= limit: break
+    for (q, line) in changed:
+      if q == p:
+        let full = root / p
+        if fileExists(full): result.add Touched(path: full, line: line)
+        break

@@ -30,12 +30,15 @@ sh "config user.email test@example.com"
 sh "config user.name test"
 sh "config commit.gpgsign false"
 writeFile(repo / "a.txt", "one\n")
-sh "add a.txt"
+writeFile(repo / "c.txt", "1\n2\n3\n4\n5\n")
+sh "add a.txt c.txt"
 sh "commit -q -m one"
 sh "branch side"
 sh "switch -q side"
 writeFile(repo / "a.txt", "two\n")
 sh "commit -q -am two"
+writeFile(repo / "c.txt", "1\n2\n3\nfour\n5\n")
+sh "commit -q -am three"
 sh "switch -q main"
 sh "branch merged"
 
@@ -70,6 +73,22 @@ check("and the branch stays where it was",
       listBranches(root).current == 0)
 check("and so does the change", readFile(file) == "dirty\n")
 sh "checkout -q -- a.txt"
+
+echo "what a branch touched:"
+check("measured against the local main", baseRef(root) == "main",
+      baseRef(root))
+check("the default branch itself touched nothing", touchedFiles(root).len == 0)
+check("onto the branch", switchBranch(root, "side", err), err)
+var t = touchedFiles(root)
+var names: seq[string] = @[]
+for x in t: names.add x.path.extractFilename
+check("its files, newest commit first", names == @["c.txt", "a.txt"],
+      names.join(" "))
+check("at the first line it changed", t.len == 2 and t[0].line == 4 and
+      t[1].line == 1)
+check("as absolute paths", t.len > 0 and t[0].path.isAbsolute)
+check("and no more of them than asked for", touchedFiles(root, 1).len == 1)
+check("back again", switchBranch(root, "main", err), err)
 
 echo "deleting:"
 check("a merged branch goes", deleteBranch(root, "merged", err), err)

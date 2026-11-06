@@ -284,6 +284,9 @@ const
     ## already made wrong. Everything that costs anything -- reading the file
     ## back, rebuilding the listing -- happens only when the cheap question
     ## was answered with a different number than last time.
+  MaxTouchedTabs = 30
+    ## How many of a branch's files a switch opens: the newest ones, which
+    ## are the ones being worked on.
   OutputFrameMs = 100
     ## How long what a program has printed may sit collected but unshown.
     ## Collecting it is the peek above, so nothing waits longer than
@@ -2994,6 +2997,43 @@ proc followCurrent(app: var App) =
     if p.len > 0 and normDir(p.parentDir) != app.explorer.dir:
       app.explorer.showDir(p.parentDir)
 
+proc openTouched(app: var App) =
+  ## After a switch the tabs become what the branch is about: the files it
+  ## changed since it left the default branch, each at the first line it
+  ## changed there, and in place of everything else that was open. Kept
+  ## whatever happens: the file in front, the two lanes, and any tab with
+  ## edits in it -- a branch switch is no reason to lose typing. On the
+  ## default branch itself nothing was changed, and the tabs stay as they are.
+  ##
+  ## The files are opened first and the others closed after, by deleting
+  ## their lines in the tab list: closing a tab is an edit there, so Ctrl+Z
+  ## in the list brings back what the switch took away. (Opening one is not
+  ## -- the list is rebuilt for that -- which is why it goes first.)
+  let touched = touchedFiles(app.branches.branches.root, MaxTouchedTabs)
+  if touched.len == 0: return
+  let font = app.editorFont
+  let front = app.buffers[app.current].path
+  var keep: seq[string] = @[]
+  for t in touched:
+    keep.add t.path
+    if t.path == front: continue
+    discard app.buffers.openFile(font, t.path, t.line, 0)
+  renderTabs(app.tabs, app.buffers)
+  var closing = 0
+  for i in countdown(app.buffers.high, 0):
+    let b = app.buffers[i]
+    if i == app.current or b.isLane or b.path.len == 0 or b.ed.changed or
+       b.path in keep:
+      continue
+    app.tabs.ed.gotoLine(i + 1, 0)
+    app.tabs.ed.deleteLine()
+    inc closing
+  # Which clears the note; what the switch said there is still to be said.
+  let said = app.tabs.note
+  applyTabEdits(app.tabs, app.buffers, app.current, font)
+  app.tabs.note = said & "; " & $touched.len & " files of the branch open" &
+    (if closing > 0: ", " & $closing & " others closed" else: "")
+
 proc drawBranches(app: var App; e: Event; area: Rect) =
   ## The branch list -- the branches of the current file's repository. It
   ## follows the current file the way the explorer does, and is asked again
@@ -3018,6 +3058,7 @@ proc drawBranches(app: var App; e: Event; area: Rect) =
               else: -1
     if e.y - area.y >= bl.ed.padding.y and row < bl.branches.names.len:
       if bl.actOnBranch(row, delete = false, app.tabs.note):
+        app.openTouched()
         # The files under the tabs are another branch's now; ask the disk at
         # once rather than in a couple of seconds.
         app.nextDiskCheck = 0
