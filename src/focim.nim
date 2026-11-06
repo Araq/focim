@@ -29,6 +29,11 @@ each with its own *flipped* edit semantics:
   "open file" dialog. Under `..` are the two places one keeps wanting to get
   back to: `[Editor]` for the directory of the file in the editor,
   `[Terminal]` for the one the terminal is in.
+- **Branches**: the git branches of the repository the current file is in,
+  when git tracks that file. A click checks one out and its (x) deletes it
+  (`git branch -d`, so an unmerged branch is refused). A switch git refuses
+  -- changes in the work tree it would overwrite -- leaves the branch as it
+  was and puts git's reason in the status bar.
 
 The same idea applied to the window itself: tabs 0 and 1 are `[config]` and
 `[layout]`, and their text IS the NIF this app is built from -- the
@@ -198,6 +203,7 @@ import focim/[synedit, terminal, config, wordindex, cliphistory, search,
               filesearch]
 import focim/track
 import focim/configstore
+import focim/gitbranches
 import focim/completion
 import focim/panels
 import focim/images
@@ -1145,6 +1151,73 @@ proc activateEntry(ex: var Explorer; idx: int;
       focus = gEditorCell
 
 # ---------------------------------------------------------------------------
+# Branch list -- the git branches of the repository the current file is in
+# ---------------------------------------------------------------------------
+#
+# The tab list's arrangement once more: every line is a branch, a click on one
+# checks it out, and its (x) deletes it. Unlike a tab, a branch is not the
+# list's to keep -- git has it -- so the text is never edited into a new
+# state; it is rebuilt from what git says after every act, and an edit typed
+# into it is simply put back.
+
+type
+  BranchList = object
+    ed: SynEdit
+    file: string         ## the file the listing was made for
+    branches: Branches
+    text: string         ## the text as last rendered
+
+proc renderBranches(bl: var BranchList) =
+  var text = ""
+  for i, n in bl.branches.names:
+    if i > 0: text.add "\n"
+    text.add n
+  if text == bl.text and bl.ed.fullText == text: return
+  let line = bl.ed.currentLine
+  let top = bl.ed.firstLine.int
+  bl.text = text
+  bl.ed.setText(text)
+  bl.ed.gotoLine(min(line, max(0, bl.branches.names.len - 1)) + 1, 0)
+  bl.ed.scrollTo(top)
+
+proc decorateBranches(bl: var BranchList) =
+  # The checked out branch takes the row, as the active tab does.
+  bl.ed.setRowHighlight(bl.branches.current, bl.ed.theme.activeLineBg)
+
+proc refreshBranches(bl: var BranchList; file: string; force = false): bool =
+  ## Ask git again. The repository is looked up only when the file changed;
+  ## the branches themselves are asked for every time, since a `git switch`
+  ## typed into the terminal is as much a change as a click here.
+  if file != bl.file or force:
+    bl.file = file
+    bl.branches.root = trackedRoot(file)
+  let fresh = listBranches(bl.branches.root)
+  if fresh == bl.branches and bl.ed.fullText == bl.text: return false
+  bl.branches = fresh
+  bl.renderBranches()
+  result = true
+
+proc actOnBranch(bl: var BranchList; line: int; delete: bool;
+                 note: var string): bool =
+  ## A click on row `line`, or on its (x). True when the work tree changed
+  ## under the open buffers -- which a switch does and a delete does not.
+  if line < 0 or line >= bl.branches.names.len: return false
+  let name = bl.branches.names[line]
+  var err = ""
+  if delete:
+    if deleteBranch(bl.branches.root, name, err): note = "deleted branch " & name
+    else: note = err
+  elif line == bl.branches.current:
+    discard
+  elif switchBranch(bl.branches.root, name, err):
+    note = "switched to " & name
+    result = true
+  else:
+    # Git left everything as it was, and so does the list.
+    note = err
+  discard bl.refreshBranches(bl.file)
+
+# ---------------------------------------------------------------------------
 # Word sets on disk
 # ---------------------------------------------------------------------------
 
@@ -1994,45 +2067,250 @@ proc harddiskCheck(buffers: var seq[BufferEntry]; current: var int;
   elif reloaded.len > 1:
     note = $reloaded.len & " files changed on disk -- reloaded"
 
-proc adjustFocusedFontSize(
-    focus: string; delta: int;
-    fonts: var Table[int, Font];
-    history: var SynEdit;
-    tabs: var TabList; explorer: var Explorer;
-    terms: var seq[TerminalView]; status: var Terminal;
-    clips: var ClipHistory;
-    buffers: var seq[BufferEntry]; current: int;
-    panelFontSize, historyFontSize,
-    terminalFontSize, statusFontSize, editorFontSize: var int) =
-  if focus.isEditor:
-    editorFontSize = clamp(editorFontSize + delta, MinFontSize, MaxFontSize)
-    let newFont = fonts.fontForSize(editorFontSize)
-    for i in 0 ..< buffers.len:
-      buffers[i].ed.setFont(newFont)
-    return
-  if focus.isTerminal:
-    terminalFontSize = clamp(terminalFontSize + delta, MinFontSize, MaxFontSize)
-    let f = fonts.fontForSize(terminalFontSize)
-    for i in 0 ..< terms.len: terms[i].term.ed.setFont(f)
-    return
-  case focus
-  of "tabs", "explorer", "clipboard":
-    panelFontSize = clamp(panelFontSize + delta, MinFontSize, MaxFontSize)
-    let f = fonts.fontForSize(panelFontSize)
-    tabs.ed.setFont(f)
-    explorer.ed.setFont(f)
-    clips.setFont(f)
-  of "history":
-    historyFontSize = clamp(historyFontSize + delta, MinFontSize, MaxFontSize)
-    history.setFont(fonts.fontForSize(historyFontSize))
-  of "status":
-    statusFontSize = clamp(statusFontSize + delta, MinFontSize, MaxFontSize)
-    status.ed.setFont(fonts.fontForSize(statusFontSize))
+# ---------------------------------------------------------------------------
+# The app -- everything one window knows, in one object, so that the pieces of
+# the main loop below can each be a proc of their own that takes the window
+# rather than a parameter list naming half of it.
+# ---------------------------------------------------------------------------
+
+type
+  App = object
+    width, height: int
+    fonts: Table[int, Font]
+    fm: FontMetrics              ## of `DefaultFontSize`: what lines measure
+    panelFontSize, historyFontSize, terminalFontSize,
+      statusFontSize, editorFontSize: int
+
+    layout: Layout
+    theme: Theme
+    trackSpec: Track
+    laneNotes: array[BufferKind, string]
+
+    buffers: seq[BufferEntry]
+    current: int
+    savedTabs: string            ## `tabs.txt` as last written
+
+    # The panels: one entry per cell the layout names, made and unmade as the
+    # layout says so. `reconcileEditors` and `reconcileTerminals` keep them in
+    # step with it; `activeEditor` and `activeTerm` say which of them the
+    # keystrokes and the commands mean.
+    editors: seq[EditorView]
+    terms: seq[TerminalView]
+    activeEditor, activeTerm: int
+    born: Newborn                ## a panel a split has just written into the
+                                 ## layout, waiting for the frame that reads
+                                 ## the layout back and makes it
+    status: Terminal
+    tabs: TabList
+    explorer: Explorer
+    branches: BranchList
+    history: SynEdit
+    clips: ClipHistory
+    comp: Completion
+
+    focus: string
+    lastActiveCell: string       ## the panel the keystrokes went to on the
+                                 ## frame before this one. What tells a focus
+                                 ## that moved to another panel -- where the
+                                 ## file that panel was left showing is the
+                                 ## one to go back to -- from a frame that
+                                 ## merely opened a file in the panel already
+                                 ## being typed in.
+    lastCurrent: int
+    lastTitle: string
+    shownTab: int                ## what the tab list was last scrolled to
+    tabsHadFocus: bool           ## show, and whether it had the focus then
+    buttons: PanelButtons        ## those of the panel the pointer is in
+    btnSize: int
+    pointerX, pointerY: int      ## where the pointer was last seen: a wheel
+                                 ## event says nothing about where it was
+    dragging, hovering: Splitter ## the border being dragged, and the one
+                                 ## merely under the pointer
+
+    words: WordIndex
+    job: IndexJob
+    finder: Finder               ## the last search
+    asked: Ask                   ## what the prompt is waiting to hear about
+    tracker: Tracker             ## the outstanding "where is this name?"
+    jumps: seq[TrackHit]         ## and the places its answer named
+
+    running: bool
+    mustDraw: bool               ## a poll turned up something to show
+    nextFrame: int               ## when a frame is due regardless
+    nextDiskCheck: int
+    windowFocused: bool
+
+template term(app: App): untyped = app.terms[app.activeTerm].term
+  ## The terminal the commands go to.
+
+proc editorFont(app: var App): Font = app.fonts.fontForSize(app.editorFontSize)
+
+proc endExchange(app: var App) =
+  ## Only ever one question is outstanding, and anything the user starts
+  ## instead of answering it withdraws it -- otherwise the next line typed
+  ## would be read as an answer to something nobody can see any more.
+  app.asked = Ask()
+  app.status.question = ""
+
+proc endExchange(app: var App; a: TermAction) =
+  if a.kind notin {TermActionKind.noAction, TermActionKind.ctrlHover,
+                   TermActionKind.ctrlClick, answer}:
+    app.endExchange()
+
+# ---------------------------------------------------------------------------
+# Fonts
+# ---------------------------------------------------------------------------
+
+proc setPanelFont(app: var App; f: Font) =
+  ## The panels that share `panelFontSize`.
+  app.tabs.ed.setFont(f)
+  app.explorer.ed.setFont(f)
+  app.branches.ed.setFont(f)
+  app.clips.setFont(f)
+
+proc adjustFocusedFontSize(app: var App; delta: int) =
+  template bump(size: untyped) =
+    size = clamp(size + delta, MinFontSize, MaxFontSize)
+  if app.focus.isEditor:
+    bump app.editorFontSize
+    let f = app.editorFont
+    for i in 0 ..< app.buffers.len: app.buffers[i].ed.setFont(f)
+  elif app.focus.isTerminal:
+    bump app.terminalFontSize
+    let f = app.fonts.fontForSize(app.terminalFontSize)
+    for i in 0 ..< app.terms.len: app.terms[i].term.ed.setFont(f)
   else:
-    discard
+    case app.focus
+    of "tabs", "explorer", "branches", "clipboard":
+      bump app.panelFontSize
+      app.setPanelFont(app.fonts.fontForSize(app.panelFontSize))
+    of "history":
+      bump app.historyFontSize
+      app.history.setFont(app.fonts.fontForSize(app.historyFontSize))
+    of "status":
+      bump app.statusFontSize
+      app.status.ed.setFont(app.fonts.fontForSize(app.statusFontSize))
+    else:
+      discard
 
+proc reopenFonts(app: var App) =
+  ## Dragged onto a display of another density. The logical sizes stay put
+  ## and only their physical counterparts change, so every font that is
+  ## already open has to be reopened at the new scale.
+  for f in app.fonts.values: closeFont(f)
+  app.fonts.clear()
+  app.setPanelFont(app.fonts.fontForSize(app.panelFontSize))
+  app.history.setFont(app.fonts.fontForSize(app.historyFontSize))
+  let terminalFont = app.fonts.fontForSize(app.terminalFontSize)
+  for i in 0 ..< app.terms.len: app.terms[i].term.ed.setFont(terminalFont)
+  app.status.ed.setFont(app.fonts.fontForSize(app.statusFontSize))
+  let f = app.editorFont
+  for i in 0 ..< app.buffers.len: app.buffers[i].ed.setFont(f)
+  app.fm = getFontMetrics(app.fonts.fontForSize(DefaultFontSize))
 
-proc main =
+# ---------------------------------------------------------------------------
+# Startup
+# ---------------------------------------------------------------------------
+
+proc listWidget(font: Font; actionFrom: int; closeButtons: bool): SynEdit =
+  ## A panel whose rows are things rather than text: framed from `actionFrom`
+  ## on, optionally with an (x) on every row, and `langNone` because a row is
+  ## a label, not code to colorize.
+  result = createSynEdit(font)
+  result.lang = langNone
+  result.setActionLines(actionFrom)
+  if closeButtons: result.setCloseButtons(0)
+
+proc migrateLayout(configText, layoutText: var string): string =
+  ## A config from when the layout lived in it: move the block across before
+  ## anything is parsed, and keep the file it came out of. Runs once -- what it
+  ## writes has no layout in it to find the next time. Answers with what is to
+  ## be said about it, "" when there was nothing to move.
+  result = ""
+  var taken = ""
+  let rest = takeLayout(configText, taken)
+  if taken.len == 0: return
+  let kept = backupConfig("config", configText)
+  configText = rest
+  saveConfig("config.nif", configText)
+  if layoutText.len == 0:
+    layoutText = taken
+    saveConfig("layout.nif", layoutText)
+    result = "the layout moved to " & configPath("layout.nif")
+  else:
+    # There is a layout.nif already, so the one in the config is the older
+    # of the two and nothing is lost by dropping it -- least of all here,
+    # where the file it was in has just been copied.
+    result = "the layout in config.nif was left behind; layout.nif has one"
+  if kept.len > 0: result.add "; the config it was in is in " & kept
+
+proc loadLanes(app: var App): tuple[configText, layoutText, moved: string] =
+  ## What the window starts as: whatever was stored last time, unless it no
+  ## longer works -- then the default, with the reason in the status bar. The
+  ## shipped ones go through the same door first, so that a mistake in what
+  ## the app itself ships is caught here and not in somebody's window.
+  template notes: untyped = app.laneNotes
+  reparseConfig(defaultConfig, app.theme, app.trackSpec, notes[bufConfig])
+  doAssert notes[bufConfig].len == 0, notes[bufConfig]
+  reparseLayout(defaultLayout, app.width, app.height, app.fm.lineHeight,
+                app.layout, notes[bufLayout])
+  doAssert notes[bufLayout].len == 0, notes[bufLayout]
+
+  var configText = loadConfig("config.nif")
+  var layoutText = loadConfig("layout.nif")
+  let moved = migrateLayout(configText, layoutText)
+
+  if configText.len > 0:
+    reparseConfig(configText, app.theme, app.trackSpec, notes[bufConfig])
+    if notes[bufConfig].len > 0:
+      # Whatever was wrong with it, the stored text stays in the buffer: it is
+      # what has to be corrected. Until it parses the window runs on the
+      # default, which the call above left in place.
+      notes[bufConfig] = configPath("config.nif") & ": " & notes[bufConfig]
+  else:
+    configText = defaultConfig
+  if layoutText.len > 0:
+    reparseLayout(layoutText, app.width, app.height, app.fm.lineHeight,
+                  app.layout, notes[bufLayout])
+    if notes[bufLayout].len > 0:
+      notes[bufLayout] = configPath("layout.nif") & ": " & notes[bufLayout]
+  else:
+    layoutText = defaultLayout
+  result = (configText, layoutText, moved)
+
+proc openSession(app: var App; configText, layoutText: string) =
+  ## The buffer list. The two lanes are tabs 0 and 1: editing one recolors the
+  ## window on the next frame, editing the other relayouts it. The rest of the
+  ## tabs are last session's.
+  let font = app.editorFont
+  app.current = 0
+  for lane in [(bufConfig, configText), (bufLayout, layoutText)]:
+    var ed = createSynEdit(font)
+    # NIF is close enough to Nim for the tokenizer: parentheses, names, numbers
+    # and '#' comments all land where they should -- and a quoted "#RRGGBB" is
+    # a string literal, which is what makes `rfColorLiterals` draw a chip of
+    # the color right beside it.
+    ed.lang = langNim
+    ed.flags = {rfColorLiterals}
+    ed.showLineNumbers = true
+    ed.setText(lane[1])
+    app.buffers.add BufferEntry(ed: ed, id: freshBufferId(), path: "",
+                                kind: lane[0])
+  for line in loadConfig("tabs.txt").splitLines:
+    let p = line.strip
+    if p.len > 0 and fileExists(p):
+      discard app.buffers.openFile(font, p, -1, -1)
+  if paramCount() >= 1:
+    app.current = app.buffers.openFile(font, paramStr(1), -1, -1)
+  else:
+    # The first tab that is a file, if the last session left one; otherwise the
+    # config lane, which is at least something to look at.
+    for i, b in app.buffers:
+      if not b.isLane:
+        app.current = i
+        break
+
+proc initApp(): App =
   # An editor wants the whole desktop, so ask for it -- as a window, not as
   # `fullScreen`: the menu bar and the other windows stay reachable, which
   # matters for an app whose terminal is meant to be used next to a browser.
@@ -2044,9 +2322,24 @@ proc main =
   # StartupWMClass matches.
   let screen = createWindow(MaxWindowWidth, MaxWindowHeight,
                             icon = focimIcon())
-  var width = screen.width
-  var height = screen.height
   gUiScale = screen.uiScale
+  result = App(width: screen.width, height: screen.height,
+               panelFontSize: DefaultFontSize, historyFontSize: DefaultFontSize,
+               terminalFontSize: DefaultFontSize,
+               statusFontSize: DefaultFontSize,
+               editorFontSize: DefaultFontSize,
+               theme: defaultTheme(), trackSpec: defaultTrack(),
+               focus: gEditorCell, shownTab: -1, pointerX: -1, pointerY: -1,
+               running: true, mustDraw: true, nextFrame: getTicks(),
+               nextDiskCheck: getTicks() + DiskCheckMs,
+               # True to begin with, and not read from anywhere: a window is
+               # normally focused the moment it is mapped, and every backend
+               # says so -- but one that said so only on a *change* would
+               # leave this false under a caret that then never blinked. The
+               # other way round costs a window launched into the background a
+               # repaint every half second until somebody clicks it, which is
+               # the cheaper thing to be wrong about.
+               windowFocused: true)
 
   # Markdown shows pictures, and on X11 the driver has no idea how to decode
   # one -- it offers somewhere to put pixels and nothing else. This is what
@@ -2055,1088 +2348,1008 @@ proc main =
   # about before there is one.
   installPixieImages()
 
-  var fonts: Table[int, Font]
-  let font = fonts.fontForSize(DefaultFontSize)
-  var fm = getFontMetrics(font)
+  let font = result.fonts.fontForSize(DefaultFontSize)
+  result.fm = getFontMetrics(font)
   setWindowTitle("focim")
 
-  var history = createSynEdit(font)
-  # The panels: one entry per cell the layout names, made and unmade as the
-  # layout says so. `reconcileEditors` and `reconcileTerminals` keep them in
-  # step with it; `activeEditor` and `activeTerm` say which of them the
-  # keystrokes and the commands mean.
-  var editors: seq[EditorView] = @[]
-  var terms: seq[TerminalView] = @[]
-  var activeEditor = 0
-  var activeTerm = 0
   # There is a terminal from the start, whether or not the layout shows one:
   # a command can be typed in the status bar and run in a panel nobody has on
   # screen, and the shell it runs in has to have been somewhere all along.
-  terms.add TerminalView(cell: TerminalStem, term: createTerminal(font))
-  template term: untyped = terms[activeTerm].term
-  # A panel a split has just written into the layout, waiting for the frame
-  # that reads the layout back and makes it.
-  var born = Newborn()
-  var status = createTerminal(font)
+  result.terms.add TerminalView(cell: TerminalStem, term: createTerminal(font))
+  result.status = createTerminal(font)
   # What makes this one the prompt rather than a second terminal: it takes the
   # questions (`question`), it resolves relative paths against the current tab
-  # (`baseDir`, set every frame below), and it is where a command that acts on
-  # the app itself is typed.
-  status.isPrompt = true
-  var tabs = TabList(ed: createSynEdit(font))
-  var explorer = Explorer(ed: createSynEdit(font))
-  tabs.ed.lang = langNone
-  explorer.ed.lang = langNone
+  # (`baseDir`, set every frame), and it is where a command that acts on the
+  # app itself is typed.
+  result.status.isPrompt = true
   # Every tab list line acts on click; in the explorer line 0 is the path
-  # field, so only the listing below it does.
-  tabs.ed.setActionLines(0)
-  explorer.ed.setActionLines(1)
-  tabs.ed.setCloseButtons(0)
-  # The history panel is a list of commands to act on, exactly like the tab
-  # list, so it gets the same framed rows and the same (x) -- which here forgets
-  # the command and frees the row for a newer one. `langNone` for the same
-  # reason the tab list uses it: a row is a label, not code to colorize.
-  history.setActionLines(0)
-  history.setCloseButtons(0)
-  history.lang = langNone
-  var panelFontSize = DefaultFontSize
-  var historyFontSize = DefaultFontSize
-  var terminalFontSize = DefaultFontSize
-  var statusFontSize = DefaultFontSize
-  var editorFontSize = DefaultFontSize
+  # field, so only the listing below it does. The branch list is a tab list of
+  # git's, and the history panel is a list of commands to act on: both get the
+  # tab list's framed rows and its (x) -- which in the history forgets the
+  # command and frees the row for a newer one.
+  result.tabs = TabList(ed: listWidget(font, 0, closeButtons = true))
+  result.explorer = Explorer(ed: listWidget(font, 1, closeButtons = false))
+  result.branches = BranchList(ed: listWidget(font, 0, closeButtons = true))
+  result.history = listWidget(font, 0, closeButtons = true)
 
-  # What the window starts as: whatever was stored last time, unless it no
-  # longer works -- then the default, with the reason in the status bar. The
-  # shipped ones go through the same door first, so that a mistake in what the
-  # app itself ships is caught here and not in somebody's window.
-  var layout = default(Layout)
-  var theme = defaultTheme()
-  var trackSpec = defaultTrack()
-  var laneNotes: array[BufferKind, string]
-  reparseConfig(defaultConfig, theme, trackSpec, laneNotes[bufConfig])
-  doAssert laneNotes[bufConfig].len == 0, laneNotes[bufConfig]
-  reparseLayout(defaultLayout, width, height, fm.lineHeight, layout,
-                laneNotes[bufLayout])
-  doAssert laneNotes[bufLayout].len == 0, laneNotes[bufLayout]
-
-  var configText = loadConfig("config.nif")
-  var layoutText = loadConfig("layout.nif")
-  # A config from when the layout lived in it: move the block across before
-  # anything is parsed, and keep the file it came out of. Runs once -- what it
-  # writes has no layout in it to find the next time.
-  var moved = ""
-  block:
-    var taken = ""
-    let rest = takeLayout(configText, taken)
-    if taken.len > 0:
-      let kept = backupConfig("config", configText)
-      configText = rest
-      saveConfig("config.nif", configText)
-      if layoutText.len == 0:
-        layoutText = taken
-        saveConfig("layout.nif", layoutText)
-        moved = "the layout moved to " & configPath("layout.nif")
-      else:
-        # There is a layout.nif already, so the one in the config is the older
-        # of the two and nothing is lost by dropping it -- least of all here,
-        # where the file it was in has just been copied.
-        moved = "the layout in config.nif was left behind; layout.nif has one"
-      if kept.len > 0: moved.add "; the config it was in is in " & kept
-
-  if configText.len > 0:
-    reparseConfig(configText, theme, trackSpec, laneNotes[bufConfig])
-    if laneNotes[bufConfig].len > 0:
-      # Whatever was wrong with it, the stored text stays in the buffer: it is
-      # what has to be corrected. Until it parses the window runs on the
-      # default, which the call above left in place.
-      laneNotes[bufConfig] = configPath("config.nif") & ": " &
-                             laneNotes[bufConfig]
-  else:
-    configText = defaultConfig
-  if layoutText.len > 0:
-    reparseLayout(layoutText, width, height, fm.lineHeight, layout,
-                  laneNotes[bufLayout])
-    if laneNotes[bufLayout].len > 0:
-      laneNotes[bufLayout] = configPath("layout.nif") & ": " &
-                             laneNotes[bufLayout]
-  else:
-    layoutText = defaultLayout
-
-  # Buffer list. The two lanes are tabs 0 and 1: editing one recolors the
-  # window on the next frame, editing the other relayouts it. The rest of the
-  # tabs are last session's.
-  var buffers: seq[BufferEntry]
-  var current = 0
-  for lane in [(bufConfig, configText), (bufLayout, layoutText)]:
-    var ed = createSynEdit(fonts.fontForSize(editorFontSize))
-    # NIF is close enough to Nim for the tokenizer: parentheses, names, numbers
-    # and '#' comments all land where they should -- and a quoted "#RRGGBB" is
-    # a string literal, which is what makes `rfColorLiterals` draw a chip of
-    # the color right beside it.
-    ed.lang = langNim
-    ed.flags = {rfColorLiterals}
-    ed.showLineNumbers = true
-    ed.setText(lane[1])
-    buffers.add BufferEntry(ed: ed, id: freshBufferId(), path: "",
-                            kind: lane[0])
-  for line in loadConfig("tabs.txt").splitLines:
-    let p = line.strip
-    if p.len > 0 and fileExists(p):
-      discard buffers.openFile(fonts.fontForSize(editorFontSize), p, -1, -1)
-  if paramCount() >= 1:
-    current = buffers.openFile(fonts.fontForSize(editorFontSize), paramStr(1), -1, -1)
-  else:
-    # The first tab that is a file, if the last session left one; otherwise the
-    # config lane, which is at least something to look at.
-    for i, b in buffers:
-      if not b.isLane:
-        current = i
-        break
-
-  var savedTabs = tabsText(buffers)
+  let (configText, layoutText, moved) = result.loadLanes()
+  result.openSession(configText, layoutText)
+  result.savedTabs = tabsText(result.buffers)
   # Said once the tabs exist to say it in: a move nobody asked for is a thing
   # to be told about, and both halves of it are open in front of them.
-  if moved.len > 0: tabs.note = moved
+  if moved.len > 0: result.tabs.note = moved
 
-  renderTabs(tabs, buffers)
-  explorer.showDir(
-    if buffers[current].path.len > 0: buffers[current].path.parentDir
-    else: os.getCurrentDir())
-  var lastCurrent = current
-  var lastTitle = ""
-  # What the tab list was last scrolled to show, and whether it was the one
-  # being typed in at the time -- see the tab list block in the loop.
-  var shownTab = -1
-  var tabsHadFocus = false
-
-  var focus = gEditorCell
-  # The panel the keystrokes went to on the frame before this one. What tells
-  # a focus that moved to another panel -- where the file that panel was left
-  # showing is the one to go back to -- from a frame that merely opened a file
-  # in the panel already being typed in.
-  var lastActiveCell = ""
-  # The panel the pointer is in, and its three buttons: a panel to the right,
-  # a panel below, and away with this one. Drawn only while the pointer is in
-  # the panel, the way the splitter grips are, so nothing is on screen until
-  # it is wanted.
-  var buttons = PanelButtons()
-  # Where the pointer was last seen. A wheel event carries its delta in `x`
-  # and `y` and nothing about where it happened, so this is what says which
-  # panel the wheel is over.
-  var pointerX, pointerY = -1
-  # The border being dragged, and the one merely under the pointer. A window
-  # is sized by pushing the borders between its panels about, and the borders
-  # are already there: the gap the layout leaves between two cells, which the
-  # background shows through. Nothing is drawn to make a handle, and no panel
-  # gives up a pixel to one.
-  var dragging = Splitter()
-  var hovering = Splitter()
+  renderTabs(result.tabs, result.buffers)
+  let p = result.buffers[result.current].path
+  result.explorer.showDir(if p.len > 0: p.parentDir else: os.getCurrentDir())
+  result.lastCurrent = result.current
 
   # The words Ctrl+Space can offer: the shipped Nimony vocabulary, whatever
   # `index` was pointed at in an earlier run, and -- from here on, a slice per
   # frame -- everything in the open buffers.
-  var words = WordIndex()
-  loadWordSets(words)
-  var job = IndexJob()
-  var comp = initCompletion(fonts.fontForSize(editorFontSize))
+  loadWordSets(result.words)
+  result.comp = initCompletion(result.editorFont)
   # What the clipboard held. Nothing reports a copy to us -- the editor's own
   # Ctrl+C goes to the system clipboard like everybody else's -- so this is
   # read rather than told, which is also what picks up a copy made in another
   # application.
-  var clips = initClipHistory(fonts.fontForSize(panelFontSize))
+  result.clips = initClipHistory(result.fonts.fontForSize(result.panelFontSize))
 
-  # The last search, and what the prompt is waiting to hear about. Both are
-  # one per window: a question that nobody can see is worse than none, and
-  # there is one status bar to show it in.
-  var finder = Finder()
-  var asked = Ask()
+# ---------------------------------------------------------------------------
+# The looks -- everything a turn of the loop asks before deciding whether
+# there is anything to draw
+# ---------------------------------------------------------------------------
 
-  # The outstanding "where is this name?", and the places its answer named.
-  # `jumps` outlives the listing that offers them by exactly one keystroke: the
-  # listing hands back a row number and this is what turns one into a place.
-  var tracker = Tracker()
-  var jumps: seq[TrackHit] = @[]
+proc waitForEvent(app: var App): Event =
+  ## The wait comes first, because it is what paces everything after it. How
+  ## long it may last is how long the work already in flight can be left
+  ## alone -- an index job wants every moment it can have, a compiler
+  ## answering a Ctrl+click and a program printing want noticing promptly --
+  ## and never longer than the next frame is due in.
+  result = default Event
+  let waitMs = min(
+    if app.job.active: 0
+    elif app.tracker.busy or anyRunning(app.terms): WorkPollMs
+    else: IdleFrameMs,
+    max(0, app.nextFrame - getTicks()))
+  if waitEvent(result, waitMs, {WantTextInput}): app.mustDraw = true
+  # Read before anything is drawn, and not in the dispatch with the rest of
+  # the events: what it decides is whether the caret blinks, and the panels
+  # are told that before the drawing.
+  if result.kind == WindowFocusGainedEvent: app.windowFocused = true
+  elif result.kind == WindowFocusLostEvent: app.windowFocused = false
 
-  var running = true
-  # The loop polls far more often than it draws. Waiting is free, looking at a
-  # channel is nearly free, and drawing this window is neither -- it is a
-  # repaint of every panel and a copy of a screenful of pixels, and on a
-  # maximized window that is the whole cost of the frame. So a turn that woke
-  # up with nothing new to show goes straight back to sleep, and the two
-  # things that ask for a frame say so: an event, and anything a poll turned
-  # up. `IdleFrameMs` is the backstop under both, for the caret.
-  var mustDraw = true
-  var nextFrame = getTicks()
-  # When the files behind the tabs, and the directory the explorer lists, are
-  # next asked whether they still say what they said. Nothing on this desktop
-  # reports a write to us, so this is the whole of how the window finds out
-  # that a build, a checkout or another editor has been through the project.
-  var nextDiskCheck = getTicks() + DiskCheckMs
-  # Whether this window is the one being typed in -- as opposed to which panel
-  # of it would get the keystroke if it were. Nothing is drawn differently for
-  # it except the caret, which stops blinking: see `blinks`.
-  #
-  # True to begin with, and not read from anywhere: a window is normally
-  # focused the moment it is mapped, and every backend says so -- but one that
-  # said so only on a *change* would leave this false under a caret that then
-  # never blinked. The other way round costs a window launched into the
-  # background a repaint every half second until somebody clicks it, which is
-  # the cheaper thing to be wrong about.
-  var windowFocused = true
-  while running:
-    # The wait comes first, because it is what paces everything below it. How
-    # long it may last is how long the work already in flight can be left
-    # alone -- an index job wants every moment it can have, a compiler
-    # answering a Ctrl+click and a program printing want noticing promptly --
-    # and never longer than the next frame is due in.
-    var e = default Event
-    let waitMs = min(
-      if job.active: 0
-      elif tracker.busy or anyRunning(terms): WorkPollMs
-      else: IdleFrameMs,
-      max(0, nextFrame - getTicks()))
-    if waitEvent(e, waitMs, {WantTextInput}): mustDraw = true
-    # Read before anything is drawn, and not down in the dispatch below with
-    # the rest of the events: what it decides is whether the caret blinks,
-    # and the panels are told that further down but still above the drawing.
-    if e.kind == WindowFocusGainedEvent: windowFocused = true
-    elif e.kind == WindowFocusLostEvent: windowFocused = false
-    # Pick up edits to the config buffer before resolving, so that the rects
-    # and the hit tests within one frame always come from the same layout.
-    # The buffer's own changed flag is the signal; consuming it here re-parses
-    # once per edit, whether the new config works out or not.
-    for b in buffers.mitems:
-      if b.isLane and b.ed.changed:
-        let src = b.ed.fullText
-        case b.kind
-        of bufConfig: reparseConfig(src, theme, trackSpec, laneNotes[bufConfig])
-        of bufLayout:
-          reparseLayout(src, width, height, fm.lineHeight, layout,
-                        laneNotes[bufLayout])
-        of bufFile: discard
-        # Stored only once it works. A file that says something the window
-        # could not be built from would come back as the same complaint on
-        # every start, and the text that has to be corrected is in the tab.
-        if laneNotes[b.kind].len == 0: saveConfig(laneFile(b.kind), src)
-        b.ed.markSaved()
-        mustDraw = true
+proc reparseLanes(app: var App) =
+  ## Pick up edits to the config buffers before resolving, so that the rects
+  ## and the hit tests within one frame always come from the same layout. The
+  ## buffer's own changed flag is the signal; consuming it here re-parses once
+  ## per edit, whether the new config works out or not.
+  for b in app.buffers.mitems:
+    if b.isLane and b.ed.changed:
+      let src = b.ed.fullText
+      case b.kind
+      of bufConfig:
+        reparseConfig(src, app.theme, app.trackSpec, app.laneNotes[bufConfig])
+      of bufLayout:
+        reparseLayout(src, app.width, app.height, app.fm.lineHeight,
+                      app.layout, app.laneNotes[bufLayout])
+      of bufFile: discard
+      # Stored only once it works. A file that says something the window
+      # could not be built from would come back as the same complaint on
+      # every start, and the text that has to be corrected is in the tab.
+      if app.laneNotes[b.kind].len == 0: saveConfig(laneFile(b.kind), src)
+      b.ed.markSaved()
+      app.mustDraw = true
 
-    # The theme goes out to every widget every frame. Buffers come and go and
-    # the colors can change with any keystroke in the config, so there is no
-    # single place to hook this that could not be forgotten later.
-    #
-    # Everything that is not the text being edited draws on `panelBg` instead
-    # of on `bg`: one color for the whole window makes a tab list, a listing
-    # and a terminal look like more of the document, and the eye has to find
-    # the seams before it can find the text.
-    var panelTheme = theme
-    panelTheme.bg = theme.panelBg
-    # A picture with transparency in it has to be resolved against something,
-    # and the something is the color the row behind it was painted with. It
-    # goes out with the theme and for the theme's reason: it can change with
-    # any keystroke in the config tab, and a picture still showing the last
-    # theme's background would be the one thing on screen that did not follow.
-    setImageBackdrop theme.bg
-    history.theme = panelTheme
-    tabs.ed.theme = panelTheme
-    explorer.ed.theme = panelTheme
-    for i in 0 ..< terms.len: terms[i].term.ed.theme = panelTheme
-    status.ed.theme = panelTheme
-    comp.theme = panelTheme
-    comp.setFont buffers[current].ed.getFont
-    clips.theme = panelTheme
-    # Whether a caret blinks is not about which panel has it but about the
-    # window. Beside the theme because it goes the same way and for the same
-    # reason: it is per-frame state that every widget needs and no widget can
-    # work out for itself, and one that was left out of the list would sit
-    # there blinking alone.
-    history.blinks = windowFocused
-    tabs.ed.blinks = windowFocused
-    explorer.ed.blinks = windowFocused
-    for i in 0 ..< terms.len: terms[i].term.ed.blinks = windowFocused
-    status.ed.blinks = windowFocused
-    clips.blinks = windowFocused
-    # The prompt has no directory of its own, so a relative path typed there is
-    # taken to be relative to the file being edited -- the same thing that path
-    # would mean written inside that file. The terminal has a `cwd` and a `cd`
-    # to move it with, and keeps resolving against those.
-    status.baseDir =
-      if buffers[current].path.len > 0: buffers[current].path.parentDir
-      else: os.getCurrentDir()
-    # Whether or not the layout shows the panel: what was copied while it was
-    # hidden is exactly what somebody goes looking for after showing it.
-    if clips.poll(): mustDraw = true
-    # What the disk has been doing behind the window's back. Up here with the
-    # other looks and not down in the drawing, so that it is asked at its own
-    # rate rather than at whatever rate the window happens to be repainting --
-    # a window nobody is typing in draws twice a second, and one with a build
-    # printing into it draws ten times a second, and neither is a reason to
-    # stat a directory more or less often.
-    if getTicks() >= nextDiskCheck:
-      nextDiskCheck = getTicks() + DiskCheckMs
-      if harddiskCheck(buffers, current, asked, focus, tabs.note):
-        mustDraw = true
-      if explorer.refreshListing(): mustDraw = true
-    # What a program has printed since the last look. This is the terminal's
-    # own `draw` calling, and it is made here instead because a frame that is
-    # never drawn would otherwise be a frame the program was never heard in --
-    # and it is exactly what it printed that has to bring the frame about.
-    # Bring about, and not demand: output is the one thing here that arrives
-    # in a stream rather than one at a time, and a keystroke is worth a frame
-    # of its own in a way that another line of a build log is not.
-    for i in 0 ..< terms.len:
-      if terms[i].term.update():
-        nextFrame = min(nextFrame, getTicks() + OutputFrameMs)
-    for b in buffers.mitems:
-      b.ed.theme = theme
-      b.ed.blinks = windowFocused
+proc panelTheme(app: App): Theme =
+  ## Everything that is not the text being edited draws on `panelBg` instead
+  ## of on `bg`: one color for the whole window makes a tab list, a listing
+  ## and a terminal look like more of the document, and the eye has to find
+  ## the seams before it can find the text.
+  result = app.theme
+  result.bg = app.theme.panelBg
 
-    # A question is the prompt's business, wherever the command that raised it
-    # was typed: it is shown in the status bar, so that is the line it is
-    # answered in, and the focus moves there when it is put. The terminal is
-    # never armed -- it is where programs run, and `yes` is one of them.
-    # `runCommand` clears its own copy when it hands the answer over.
-    status.question = asked.question
+proc spreadTheme(app: var App) =
+  ## The theme goes out to every widget every frame. Buffers come and go and
+  ## the colors can change with any keystroke in the config, so there is no
+  ## single place to hook this that could not be forgotten later.
+  let pt = app.panelTheme
+  # A picture with transparency in it has to be resolved against something,
+  # and the something is the color the row behind it was painted with. It
+  # goes out with the theme and for the theme's reason: it can change with
+  # any keystroke in the config tab, and a picture still showing the last
+  # theme's background would be the one thing on screen that did not follow.
+  setImageBackdrop app.theme.bg
+  # Whether a caret blinks is not about which panel has it but about the
+  # window. Beside the theme because it goes the same way and for the same
+  # reason: it is per-frame state that every widget needs and no widget can
+  # work out for itself, and one that was left out of the list would sit
+  # there blinking alone.
+  let blinks = app.windowFocused
+  for ed in [addr app.history, addr app.tabs.ed, addr app.explorer.ed,
+             addr app.branches.ed, addr app.status.ed]:
+    ed.theme = pt
+    ed.blinks = blinks
+  for t in app.terms.mitems:
+    t.term.ed.theme = pt
+    t.term.ed.blinks = blinks
+  app.comp.theme = pt
+  app.comp.setFont app.buffers[app.current].ed.getFont
+  app.clips.theme = pt
+  app.clips.blinks = blinks
+  for b in app.buffers.mitems:
+    b.ed.theme = app.theme
+    b.ed.blinks = blinks
 
-    # An edit that the search did not make has moved every hit behind it, so
-    # the hits go, and the highlighting with them. What was typed is what the
-    # user is looking at now -- not what the search found before it.
-    for b in buffers.mitems:
-      if b.search.stale(b.ed):
-        b.search.clear()
-        b.ed.clearMarkers()
+proc checkDisk(app: var App) =
+  ## What the disk has been doing behind the window's back. Asked at its own
+  ## rate rather than at whatever rate the window happens to be repainting --
+  ## a window nobody is typing in draws twice a second, and one with a build
+  ## printing into it draws ten times a second, and neither is a reason to
+  ## stat a directory more or less often.
+  if getTicks() < app.nextDiskCheck: return
+  app.nextDiskCheck = getTicks() + DiskCheckMs
+  if harddiskCheck(app.buffers, app.current, app.asked, app.focus,
+                   app.tabs.note):
+    app.mustDraw = true
+  if app.explorer.refreshListing(): app.mustDraw = true
+  # Only while it is shown: a listing nobody can see is two git processes
+  # every couple of seconds for nothing. It catches up when it reappears.
+  if app.layout.cell("branches") and
+     app.branches.refreshBranches(app.buffers[app.current].path):
+    app.mustDraw = true
 
-    # The word index, a slice of one buffer per frame: whichever buffer the
-    # last edit left behind is caught up on before any other work, and none of
-    # it is ever felt because none of it is ever more than a couple hundred
-    # lines. `index` jobs run the same way, a few files at a time.
-    for i in 0 ..< buffers.len:
-      if buffers[i].idx.needsIndexing(buffers[i].ed):
-        discard words.indexSlice(buffers[i].ed, buffers[i].idx)
-        break
-    if job.active:
-      # `JobSliceMs` worth of files, and then one frame -- rather than a frame
-      # per batch, which on a fast disk is a repaint of the whole window for
-      # every couple of milliseconds of reading.
-      let deadline = getTicks() + JobSliceMs
-      while stepIndexJob(job, files = 32) and getTicks() < deadline:
-        discard
-      if job.active:
-        tabs.note = job.progress
-      else:
-        let ws = doneIndexJob(job)
-        words.addSet ws
-        saveConfig(wordSetFile(ws.name), ws.toText)
-        tabs.note = "indexed " & ws.name & ": " & $ws.words.len & " words" &
-          (if job.skipped > 0: ", " & $job.skipped & " files unreadable" else: "") &
-          (if job.truncated: ", stopped at " & $MaxIndexFiles & " files" else: "")
-        job = IndexJob()
+proc stepWordIndex(app: var App) =
+  ## The word index, a slice of one buffer per frame: whichever buffer the
+  ## last edit left behind is caught up on before any other work, and none of
+  ## it is ever felt because none of it is ever more than a couple hundred
+  ## lines. `index` jobs run the same way, a few files at a time.
+  for b in app.buffers.mitems:
+    if b.idx.needsIndexing(b.ed):
+      discard app.words.indexSlice(b.ed, b.idx)
+      break
+  if not app.job.active: return
+  # `JobSliceMs` worth of files, and then one frame -- rather than a frame
+  # per batch, which on a fast disk is a repaint of the whole window for
+  # every couple of milliseconds of reading.
+  let deadline = getTicks() + JobSliceMs
+  while stepIndexJob(app.job, files = 32) and getTicks() < deadline:
+    discard
+  if app.job.active:
+    app.tabs.note = app.job.progress
+  else:
+    let ws = doneIndexJob(app.job)
+    app.words.addSet ws
+    saveConfig(wordSetFile(ws.name), ws.toText)
+    app.tabs.note = "indexed " & ws.name & ": " & $ws.words.len & " words" &
+      (if app.job.skipped > 0: ", " & $app.job.skipped & " files unreadable"
+       else: "") &
+      (if app.job.truncated: ", stopped at " & $MaxIndexFiles & " files"
+       else: "")
+    app.job = IndexJob()
 
-    # The compiler answers frames after the click that asked it, which is the
-    # whole point of asking in a thread -- so nothing here may assume the
-    # editor still looks the way it did when the question was put.
-    tracker.update()
-    if tracker.note.len > 0:
-      tabs.note = tracker.note
-      tracker.note = ""
-      mustDraw = true
-    if tracker.ready:
-      tracker.ready = false
-      mustDraw = true
-      jumps = tracker.hits
-      if jumps.len == 1:
-        # One place is not a choice. A listing of it would be a keystroke
-        # asking which of the one.
-        jumpTo(jumps[0], buffers, current, fonts.fontForSize(editorFontSize),
-               focus, tabs.note)
-        jumps.setLen 0
-      else:
-        comp.choose(trackRows(jumps, tracker.project.parentDir, buffers),
-                    buffers[current].ed)
-        focus = gEditorCell
+proc pollTracker(app: var App) =
+  ## The compiler answers frames after the click that asked it, which is the
+  ## whole point of asking in a thread -- so nothing here may assume the
+  ## editor still looks the way it did when the question was put.
+  app.tracker.update()
+  if app.tracker.note.len > 0:
+    app.tabs.note = app.tracker.note
+    app.tracker.note = ""
+    app.mustDraw = true
+  if not app.tracker.ready: return
+  app.tracker.ready = false
+  app.mustDraw = true
+  app.jumps = app.tracker.hits
+  if app.jumps.len == 1:
+    # One place is not a choice. A listing of it would be a keystroke asking
+    # which of the one.
+    jumpTo(app.jumps[0], app.buffers, app.current, app.editorFont, app.focus,
+           app.tabs.note)
+    app.jumps.setLen 0
+  else:
+    app.comp.choose(trackRows(app.jumps, app.tracker.project.parentDir,
+                              app.buffers),
+                    app.buffers[app.current].ed)
+    app.focus = gEditorCell
 
-    # Everything above was a look; below is the frame. An index job's count
-    # is deliberately not among the things that ask for one -- a job wants the
-    # time the drawing would take, and twice a second is as often as a number
-    # going up is worth being redrawn for.
-    if not mustDraw and getTicks() < nextFrame: continue
-    mustDraw = false
+proc lookAround(app: var App) =
+  app.reparseLanes()
+  app.spreadTheme()
+  # The prompt has no directory of its own, so a relative path typed there is
+  # taken to be relative to the file being edited -- the same thing that path
+  # would mean written inside that file. The terminal has a `cwd` and a `cd`
+  # to move it with, and keeps resolving against those.
+  let p = app.buffers[app.current].path
+  app.status.baseDir = if p.len > 0: p.parentDir else: os.getCurrentDir()
+  # Whether or not the layout shows the panel: what was copied while it was
+  # hidden is exactly what somebody goes looking for after showing it.
+  if app.clips.poll(): app.mustDraw = true
+  app.checkDisk()
+  # What a program has printed since the last look. This is the terminal's
+  # own `draw` calling, and it is made here instead because a frame that is
+  # never drawn would otherwise be a frame the program was never heard in --
+  # and it is exactly what it printed that has to bring the frame about.
+  # Bring about, and not demand: output is the one thing here that arrives
+  # in a stream rather than one at a time, and a keystroke is worth a frame
+  # of its own in a way that another line of a build log is not.
+  for t in app.terms.mitems:
+    if t.term.update():
+      app.nextFrame = min(app.nextFrame, getTicks() + OutputFrameMs)
+  # A question is the prompt's business, wherever the command that raised it
+  # was typed: it is shown in the status bar, so that is the line it is
+  # answered in, and the focus moves there when it is put. The terminal is
+  # never armed -- it is where programs run, and `yes` is one of them.
+  # `runCommand` clears its own copy when it hands the answer over.
+  app.status.question = app.asked.question
+  # An edit that the search did not make has moved every hit behind it, so
+  # the hits go, and the highlighting with them. What was typed is what the
+  # user is looking at now -- not what the search found before it.
+  for b in app.buffers.mitems:
+    if b.search.stale(b.ed):
+      b.search.clear()
+      b.ed.clearMarkers()
+  app.stepWordIndex()
+  app.pollTracker()
 
-    let lm = layoutMetrics(width, height, fm.lineHeight)
-    # Borders, before the layout is resolved, so that a drag is in the frame
-    # it happened in rather than in the one after it. What a drag changes is
-    # the layout itself; the text of it is written back once, on the release --
-    # a buffer edited on every mouse move would be a hundred entries in the
-    # undo stack and a reparse for each of them.
-    case e.kind
-    of MouseDownEvent:
-      if e.button == LeftButton:
-        let s = layout.splitterAt(lm, e.x, e.y)
-        if s.found:
-          dragging = s
-          e = default Event
-    of MouseMoveEvent:
-      if dragging.found:
-        discard layout.dragTo(lm, dragging, e.x, e.y)
+# ---------------------------------------------------------------------------
+# The frame -- panels, borders, and what the event did to them
+# ---------------------------------------------------------------------------
+
+proc dragBorders(app: var App; e: var Event; lm: LayoutMetrics) =
+  ## Borders, before the layout is resolved, so that a drag is in the frame
+  ## it happened in rather than in the one after it. What a drag changes is
+  ## the layout itself; the text of it is written back once, on the release --
+  ## a buffer edited on every mouse move would be a hundred entries in the
+  ## undo stack and a reparse for each of them. An event the drag took is
+  ## cleared, so no panel sees it.
+  case e.kind
+  of MouseDownEvent:
+    if e.button == LeftButton:
+      let s = app.layout.splitterAt(lm, e.x, e.y)
+      if s.found:
+        app.dragging = s
         e = default Event
-      else:
-        hovering = layout.splitterAt(lm, e.x, e.y)
-    of MouseUpEvent:
-      if dragging.found:
-        # The tab is the file, so this is where a drag ends up.
-        putLayout(buffers, layout)
-        dragging = Splitter()
-        e = default Event
-    of WindowFocusLostEvent:
-      # A button released over another window is a release this one never
-      # hears about, and a border that went on following the pointer after
-      # that would be a window that resizes itself while nobody is looking.
-      dragging = Splitter()
-    else: discard
-
-    let cells = layout.resolve(lm)
-    # The panels are whatever the layout says they are: a split writes a cell
-    # into `layout.nif` and this is where that cell becomes a panel, as does
-    # one typed into the file by hand.
-    reconcileEditors(editors, layout.cellNames, buffers, current, born)
-    reconcileTerminals(terms, layout.cellNames,
-                       fonts.fontForSize(terminalFontSize), panelTheme, born)
-    born = Newborn()
-
-    # Only ever one question is outstanding, and anything the user starts
-    # instead of answering it withdraws it -- otherwise the next line typed
-    # would be read as an answer to something nobody can see any more.
-    template endExchange() =
-      asked = Ask()
-      status.question = ""
-    template endExchange(a: TermAction) =
-      if a.kind notin {TermActionKind.noAction, TermActionKind.ctrlHover,
-                       TermActionKind.ctrlClick, answer}:
-        endExchange()
-    # Which panel the keystrokes are going to, and which buffer that panel is
-    # showing. Everything below that reaches for `buffers[current].ed` -- a
-    # clipping pasted into it, a completion, a jump to a definition, the line
-    # the status bar reports -- means this panel and no other, so its seat is
-    # the one the buffer wears from here to the end of the frame. The panels
-    # that are merely drawn borrow the buffer across their own `draw` and hand
-    # it straight back; see the editor block.
-    #
-    # `current` and the active panel's `buf` are one fact written down twice,
-    # and the panel is the copy that is written *to*: a file opened anywhere
-    # -- the explorer, `open`, a Ctrl+click into another file, a search that
-    # ran on through the buffers -- moves `current` and has nothing else to
-    # remember. The panel is read back only when the focus has moved to a
-    # different one, which is the one moment it knows something `current` does
-    # not: which file was left in it.
-    for i in 0 ..< editors.len:
-      if editors[i].cell == focus: activeEditor = i
-    if activeEditor >= editors.len: activeEditor = 0
-    if editors.len > 0:
-      gEditorCell = editors[activeEditor].cell
-      gEditorSlot = editors[activeEditor].slot
-      if gEditorCell != lastActiveCell:
-        # By cell and not by index: panels come and go with the layout, so the
-        # index of the one being typed in moves without the focus going
-        # anywhere. A panel whose file has since been closed keeps `current`
-        # as it stands rather than showing nothing.
-        lastActiveCell = gEditorCell
-        let b = buffers.indexOfId(editors[activeEditor].buf)
-        if b >= 0: current = b
-      editors[activeEditor].buf = buffers[current].id
-      buffers[current].ed.enter editors[activeEditor].slot
-    template showInActivePanel() =
-      ## The same again, for a file picked further down this frame. The bit
-      ## that matters is the seat: the panel draws `buffers[current]` below
-      ## whatever `current` has become by then, so a buffer still sitting in
-      ## some other panel's seat is drawn at that panel's line for one frame
-      ## before the top of the next one puts it right. `openFile` takes the
-      ## seat itself, which leaves the tab list -- the one place that makes a
-      ## buffer current without opening it.
-      if editors.len > 0:
-        editors[activeEditor].buf = buffers[current].id
-        buffers[current].ed.enter editors[activeEditor].slot
-    for i in 0 ..< terms.len:
-      if terms[i].cell == focus: activeTerm = i
-    if activeTerm >= terms.len: activeTerm = 0
-    if terms[activeTerm].cell notin cells:
-      # The layout is not showing the terminal the commands were going to, so
-      # they go to one it does show.
-      for i in 0 ..< terms.len:
-        if terms[i].cell in cells:
-          activeTerm = i
-          break
-    gTerminalCell = terms[activeTerm].cell
-
-    # A layout may have dropped the cell that had the focus.
-    if focus notin cells: focus = gEditorCell
-
-    # Fill background -- gaps between cells show this color as borders, so it
-    # comes from the theme: `actionColor` is what the theme already uses to
-    # frame things.
-    fillRect(rect(0, 0, width, height), theme.actionColor)
-
-    # The border under the pointer, in the colors the theme already keeps for
-    # a thing that is dragged: this is a scrollbar grip by another name, and a
-    # window whose panels can be pushed about has to say so before they are.
-    let grip = if dragging.found: dragging else: hovering
-    if grip.found:
-      fillRect(layout.splitterRect(lm, grip),
-               if dragging.found: theme.scrollBarActiveColor
-               else: theme.scrollBarColor)
-
-    case e.kind
-    of QuitEvent, WindowCloseEvent:
-      running = false
-    of WindowResizeEvent, WindowMetricsEvent:
-      width = e.x
-      height = e.y
-      if e.kind == WindowMetricsEvent and e.uiScale > 0 and e.uiScale != gUiScale:
-        # Dragged onto a display of another density. The logical sizes stay put
-        # and only their physical counterparts change, so every font that is
-        # already open has to be reopened at the new scale.
-        gUiScale = e.uiScale
-        for f in fonts.values: closeFont(f)
-        fonts.clear()
-        let panelFont = fonts.fontForSize(panelFontSize)
-        tabs.ed.setFont(panelFont)
-        explorer.ed.setFont(panelFont)
-        history.setFont(fonts.fontForSize(historyFontSize))
-        let terminalFont = fonts.fontForSize(terminalFontSize)
-        for i in 0 ..< terms.len: terms[i].term.ed.setFont(terminalFont)
-        status.ed.setFont(fonts.fontForSize(statusFontSize))
-        let editorFont = fonts.fontForSize(editorFontSize)
-        for i in 0 ..< buffers.len:
-          buffers[i].ed.setFont(editorFont)
-        fm = getFontMetrics(fonts.fontForSize(DefaultFontSize))
-    of MouseMoveEvent:
-      pointerX = e.x
-      pointerY = e.y
-    of MouseWheelEvent:
-      # The wheel turns whatever it is pointing at, focused or not -- reaching
-      # for the wheel is not a decision to type there. The event is consumed,
-      # so the focused panel does not scroll along with the one under the
-      # pointer.
-      let under = cells.hitTest(pointerX, pointerY).name
-      case under
-      of "tabs": tabs.ed.wheelScroll(e.y)
-      of "explorer": explorer.ed.wheelScroll(e.y)
-      of "history": history.wheelScroll(e.y)
-      of "clipboard": clips.wheelScroll(e.y)
-      of "status": status.ed.wheelScroll(e.y)
-      else:
-        if under.isEditor:
-          # Scrolling is the panel's own affair and not the buffer's, so the
-          # panel takes its seat for as long as it takes to scroll it.
-          let i = editors.viewOf(under)
-          let b = if i >= 0: buffers.indexOfId(editors[i].buf) else: -1
-          if b >= 0:
-            buffers[b].ed.enter editors[i].slot
-            buffers[b].ed.wheelScroll(e.y)
-            if b == current: buffers[b].ed.enter editors[activeEditor].slot
-        elif under.isTerminal:
-          for i in 0 ..< terms.len:
-            if terms[i].cell == under: terms[i].term.ed.wheelScroll(e.y)
+  of MouseMoveEvent:
+    if app.dragging.found:
+      discard app.layout.dragTo(lm, app.dragging, e.x, e.y)
       e = default Event
-    of MouseDownEvent:
-      pointerX = e.x
-      pointerY = e.y
-      comp.dismiss()
-      let hit = cells.hitTest(e.x, e.y)
-      if hit.name.len > 0:
-        focus = hit.name
-    of TextInputEvent:
-      # Ctrl+Space, Ctrl+<digit> and Ctrl+<letter> are commands, not text. X11
-      # hands the app both, and the character would land in the buffer right
-      # where the paste is about to go -- or, for a letter, as the control
-      # character it stands for; the key event above has already dealt with it.
-      if CtrlPressed in e.mods and e.text[1] == '\0' and
-         (e.text[0] in {' ', '1'..'9'} or e.text[0] < ' '):
-        e = default Event
-    of KeyDownEvent:
-      let cmd = CtrlPressed in e.mods or GuiPressed in e.mods
-      if cmd and e.key == KeyS:
-        saveCurrent(buffers, current, tabs.note)
-        e = default Event  # consume the event
-      elif cmd and e.key == KeyP:
-        # "Quick open", for the muscle memory every other editor has trained:
-        # the prompt, with the command already typed, so that the file name is
-        # all that is left to do. It is the ordinary `open` command -- Tab
-        # completes it and Enter runs it like any other.
-        if "status" in cells:
-          endExchange()
-          prepareCommand(status, buffers, current, "open ", tabs.note)
-          focus = "status"
-        else:
-          # A layout without a status bar has nowhere to type it.
-          tabs.note = "no 'status' cell in the layout"
-        e = default Event  # consume the event
-      elif cmd and e.key == KeyF:
-        # The same quick way in as Ctrl+P, for the other command one reaches
-        # for without thinking. `find ` and not `f `: the long name is the one
-        # that says what the line is about while it is being typed.
-        if "status" in cells:
-          endExchange()
-          prepareCommand(status, buffers, current, "find ", tabs.note)
-          focus = "status"
-        else:
-          tabs.note = "no 'status' cell in the layout"
-        e = default Event  # consume the event
-      elif e.key == KeyF3:
-        # What every other editor puts there, and the reason `next` and `prev`
-        # do not have to be typed to walk a search. Moving the finger while a
-        # replace was asking about a match would answer for a different one,
-        # so it withdraws the question like any other command.
-        endExchange()
-        gotoNextMatch(buffers, current, finder, ShiftPressed in e.mods, theme,
-                      tabs.note)
-        focus = gEditorCell
-        e = default Event  # consume the event
-      elif cmd and e.key == KeyW:
-        # Close the current tab by deleting its line, so that it goes through
-        # the tab list's undo stack like a hand-made deletion would.
-        tabs.ed.gotoLine(current + 1, 0)
-        tabs.ed.deleteLine()
-        e = default Event  # consume the event
-      elif cmd and (e.key == KeyEqual or e.key == KeyPlus or e.key == KeyMinus):
-        let delta = if e.key == KeyMinus: -1 else: 1
-        adjustFocusedFontSize(focus, delta, fonts, history,
-                              tabs, explorer, terms, status, clips,
-                              buffers, current,
-                              panelFontSize, historyFontSize,
-                              terminalFontSize, statusFontSize, editorFontSize)
-        e = default Event  # consume the event
-      elif cmd and e.key in {Key1 .. Key9} and focus.isEditor and
-           "clipboard" in cells:
-        # The panel is numbered, so a row is taken by its number rather than by
-        # being selected first. Nothing has to be up, nothing has to be aimed
-        # at, and the arrow keys stay where they belong.
-        let text = clips.entry(ord(e.key) - ord(Key1) + 1)
-        if text.len > 0: buffers[current].ed.insertText(text)
-        e = default Event  # consume the event
-      elif cmd and e.key == KeySpace and focus.isEditor:
-        comp.show(words, buffers[current].ed)
-        if not comp.active:
-          tabs.note = if comp.prefix.len > 0:
-                        "no word starts with '" & comp.prefix & "'"
-                      else: "no words indexed yet"
-        e = default Event  # consume the event
-      elif focus.isEditor and comp.handleKey(e, buffers[current].ed):
-        # While the listing is up a few keys belong to it. Everything else --
-        # letters, backspace, the arrows sideways -- goes to the editor as
-        # usual and narrows the listing through the prefix.
-        let pick = comp.chosen
-        if pick >= 0 and pick < jumps.len:
-          # A listing of places rather than of words: taking a row goes there.
-          jumpTo(jumps[pick], buffers, current,
-                 fonts.fontForSize(editorFontSize), focus, tabs.note)
-          jumps.setLen 0
-        e = default Event  # consume the event
-      elif e.key == KeyEnter and focus == "tabs":
-        # Enter activates a tab instead of inserting a newline.
-        let idx = tabs.ed.currentLine
-        if idx < buffers.len:
-          current = idx
-          showInActivePanel()
-          focus = gEditorCell
-        e = default Event
-      elif e.key == KeyEnter and focus == "explorer":
-        let line = explorer.ed.currentLine
-        if line == 0:
-          let full = resolveIn(explorer.base, explorer.ed.getLineText(0))
-          if full.len > 0 and dirExists(full):
-            explorer.showDir(full)
-          elif full.len > 0 and fileExists(full):
-            current = buffers.openFile(fonts.fontForSize(editorFontSize),
-                                       full, -1, -1)
-            focus = gEditorCell
-          elif explorer.entries.len > 0:
-            # A partial name accepts the first match.
-            explorer.activateEntry(0, buffers, current,
-                                   fonts.fontForSize(editorFontSize), focus,
-                                   term.cwd, tabs.note)
-        elif line - 1 < explorer.entries.len:
-          explorer.activateEntry(line - 1, buffers, current,
-                                 fonts.fontForSize(editorFontSize), focus,
-                                 term.cwd, tabs.note)
-        e = default Event
-    else: discard
+    else:
+      app.hovering = app.layout.splitterAt(lm, e.x, e.y)
+  of MouseUpEvent:
+    if app.dragging.found:
+      # The tab is the file, so this is where a drag ends up.
+      putLayout(app.buffers, app.layout)
+      app.dragging = Splitter()
+      e = default Event
+  of WindowFocusLostEvent:
+    # A button released over another window is a release this one never
+    # hears about, and a border that went on following the pointer after
+    # that would be a window that resizes itself while nobody is looking.
+    app.dragging = Splitter()
+  else: discard
 
-    # What a button does, and what `split` and `unsplit` do in the prompt --
-    # one description of it, since they are the same act. Both come down to an
-    # edit of the layout, which the next frame reads back and turns into a
-    # panel.
-    template splitPanelAt(panel: string; sideways: bool) =
-      let stem = stemOf(panel)
-      if stem.len == 0:
-        tabs.note = panel & " is not a panel there can be two of"
-      elif panelsOf(layout.cellNames, stem).len >= MaxViews:
-        tabs.note = "at most " & $MaxViews & " " & stem & " panels"
-      else:
-        let fresh = freeName(layout.cellNames, stem)
-        if layout.splitCell(panel, fresh, sideways):
-          born = Newborn(cell: fresh, parent: panel)
-          putLayout(buffers, layout)
-          # The panel asked for is the one to type in, so it takes the
-          # keystrokes. It exists from the next frame, when the layout is read
-          # back -- and for exactly that long `focus` names a cell that is not
-          # there yet, which is what `focus notin cells` is already for.
-          focus = fresh
+proc pickActivePanels(app: var App; cells: Table[string, Rect]) =
+  ## Which panel the keystrokes are going to, and which buffer that panel is
+  ## showing. Everything after this that reaches for `buffers[current].ed` --
+  ## a clipping pasted into it, a completion, a jump to a definition, the
+  ## line the status bar reports -- means this panel and no other, so its seat
+  ## is the one the buffer wears from here to the end of the frame. The panels
+  ## that are merely drawn borrow the buffer across their own `draw` and hand
+  ## it straight back; see `drawEditors`.
+  ##
+  ## `current` and the active panel's `buf` are one fact written down twice,
+  ## and the panel is the copy that is written *to*: a file opened anywhere
+  ## -- the explorer, `open`, a Ctrl+click into another file, a search that
+  ## ran on through the buffers -- moves `current` and has nothing else to
+  ## remember. The panel is read back only when the focus has moved to a
+  ## different one, which is the one moment it knows something `current` does
+  ## not: which file was left in it.
+  for i in 0 ..< app.editors.len:
+    if app.editors[i].cell == app.focus: app.activeEditor = i
+  if app.activeEditor >= app.editors.len: app.activeEditor = 0
+  if app.editors.len > 0:
+    template active: untyped = app.editors[app.activeEditor]
+    gEditorCell = active.cell
+    gEditorSlot = active.slot
+    if gEditorCell != app.lastActiveCell:
+      # By cell and not by index: panels come and go with the layout, so the
+      # index of the one being typed in moves without the focus going
+      # anywhere. A panel whose file has since been closed keeps `current`
+      # as it stands rather than showing nothing.
+      app.lastActiveCell = gEditorCell
+      let b = app.buffers.indexOfId(active.buf)
+      if b >= 0: app.current = b
+    active.buf = app.buffers[app.current].id
+    app.buffers[app.current].ed.enter active.slot
+  for i in 0 ..< app.terms.len:
+    if app.terms[i].cell == app.focus: app.activeTerm = i
+  if app.activeTerm >= app.terms.len: app.activeTerm = 0
+  if app.terms[app.activeTerm].cell notin cells:
+    # The layout is not showing the terminal the commands were going to, so
+    # they go to one it does show.
+    for i in 0 ..< app.terms.len:
+      if app.terms[i].cell in cells:
+        app.activeTerm = i
+        break
+  gTerminalCell = app.terms[app.activeTerm].cell
 
-    template closePanelAt(panel: string) =
-      if panel.isEditor and panelsOf(layout.cellNames, EditorStem).len == 1:
-        tabs.note = "the last editor panel stays: there would be nowhere " &
+proc showInActivePanel(app: var App) =
+  ## `pickActivePanels` again, for a file picked further down the frame. The
+  ## bit that matters is the seat: the panel draws `buffers[current]` below
+  ## whatever `current` has become by then, so a buffer still sitting in some
+  ## other panel's seat is drawn at that panel's line for one frame before the
+  ## top of the next one puts it right. `openFile` takes the seat itself,
+  ## which leaves the tab list -- the one place that makes a buffer current
+  ## without opening it.
+  if app.editors.len > 0:
+    app.editors[app.activeEditor].buf = app.buffers[app.current].id
+    app.buffers[app.current].ed.enter app.editors[app.activeEditor].slot
+
+proc wheelPanel(app: var App; under: string; delta: int) =
+  ## The wheel turns whatever it is pointing at, focused or not -- reaching
+  ## for the wheel is not a decision to type there.
+  case under
+  of "tabs": app.tabs.ed.wheelScroll(delta)
+  of "explorer": app.explorer.ed.wheelScroll(delta)
+  of "branches": app.branches.ed.wheelScroll(delta)
+  of "history": app.history.wheelScroll(delta)
+  of "clipboard": app.clips.wheelScroll(delta)
+  of "status": app.status.ed.wheelScroll(delta)
+  else:
+    if under.isEditor:
+      # Scrolling is the panel's own affair and not the buffer's, so the
+      # panel takes its seat for as long as it takes to scroll it.
+      let i = app.editors.viewOf(under)
+      let b = if i >= 0: app.buffers.indexOfId(app.editors[i].buf) else: -1
+      if b >= 0:
+        app.buffers[b].ed.enter app.editors[i].slot
+        app.buffers[b].ed.wheelScroll(delta)
+        if b == app.current:
+          app.buffers[b].ed.enter app.editors[app.activeEditor].slot
+    elif under.isTerminal:
+      for t in app.terms.mitems:
+        if t.cell == under: t.term.ed.wheelScroll(delta)
+
+proc splitPanelAt(app: var App; panel: string; sideways: bool) =
+  ## What the split buttons do, and what `split` does in the prompt -- one
+  ## description of it, since they are the same act. It comes down to an edit
+  ## of the layout, which the next frame reads back and turns into a panel.
+  let stem = stemOf(panel)
+  if stem.len == 0:
+    app.tabs.note = panel & " is not a panel there can be two of"
+  elif panelsOf(app.layout.cellNames, stem).len >= MaxViews:
+    app.tabs.note = "at most " & $MaxViews & " " & stem & " panels"
+  else:
+    let fresh = freeName(app.layout.cellNames, stem)
+    if app.layout.splitCell(panel, fresh, sideways):
+      app.born = Newborn(cell: fresh, parent: panel)
+      putLayout(app.buffers, app.layout)
+      # The panel asked for is the one to type in, so it takes the
+      # keystrokes. It exists from the next frame, when the layout is read
+      # back -- and for exactly that long `focus` names a cell that is not
+      # there yet, which is what `focus notin cells` is already for.
+      app.focus = fresh
+
+proc closePanelAt(app: var App; panel: string) =
+  ## The (x) button, and `unsplit` in the prompt.
+  if panel.isEditor and panelsOf(app.layout.cellNames, EditorStem).len == 1:
+    app.tabs.note = "the last editor panel stays: there would be nowhere " &
                     "to type the layout back"
-      elif layout.removeCell(panel):
-        putLayout(buffers, layout)
-        if focus == panel: focus = gEditorCell
+  elif app.layout.removeCell(panel):
+    putLayout(app.buffers, app.layout)
+    if app.focus == panel: app.focus = gEditorCell
 
-    # The panel the pointer is in offers three buttons in its top right
-    # corner. Tested here, before a single widget is drawn, and the event is
-    # taken away when one of them is hit: a click on a button is not also a
-    # click in the text under it.
-    let btnSize = max(scaledPx(9), fm.lineHeight - scaledPx(3))
-    block:
-      let over = cells.hitTest(pointerX, pointerY)
-      if over.name.len == 0:
-        buttons = PanelButtons()
-      else:
-        buttons = PanelButtons(cell: over.name, hot: btnNone,
+proc explorerEnter(app: var App) =
+  ## Enter in the explorer: on the path line it goes where the line says, or
+  ## takes the first match of the filter; on an entry it activates the entry.
+  let line = app.explorer.ed.currentLine
+  var idx = line - 1
+  if line == 0:
+    let full = resolveIn(app.explorer.base, app.explorer.ed.getLineText(0))
+    if full.len > 0 and dirExists(full):
+      app.explorer.showDir(full)
+      return
+    elif full.len > 0 and fileExists(full):
+      app.current = app.buffers.openFile(app.editorFont, full, -1, -1)
+      app.focus = gEditorCell
+      return
+    # A partial name accepts the first match.
+    idx = 0
+  if idx < app.explorer.entries.len:
+    app.explorer.activateEntry(idx, app.buffers, app.current, app.editorFont,
+                               app.focus, app.term.cwd, app.tabs.note)
+
+proc prepareCommand(app: var App; cells: Table[string, Rect]; cmd: string) =
+  ## Ctrl+P and Ctrl+F: the prompt, with the command already typed.
+  if "status" in cells:
+    app.endExchange()
+    prepareCommand(app.status, app.buffers, app.current, cmd, app.tabs.note)
+    app.focus = "status"
+  else:
+    # A layout without a status bar has nowhere to type it.
+    app.tabs.note = "no 'status' cell in the layout"
+
+proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
+  ## The keys that mean something to the window rather than to the panel
+  ## that has the focus. Every one of them consumes the event.
+  let cmd = CtrlPressed in e.mods or GuiPressed in e.mods
+  if cmd and e.key == KeyS:
+    saveCurrent(app.buffers, app.current, app.tabs.note)
+  elif cmd and e.key == KeyP:
+    # "Quick open", for the muscle memory every other editor has trained:
+    # the prompt, with the command already typed, so that the file name is
+    # all that is left to do. It is the ordinary `open` command -- Tab
+    # completes it and Enter runs it like any other.
+    app.prepareCommand(cells, "open ")
+  elif cmd and e.key == KeyF:
+    # The same quick way in as Ctrl+P, for the other command one reaches
+    # for without thinking. `find ` and not `f `: the long name is the one
+    # that says what the line is about while it is being typed.
+    app.prepareCommand(cells, "find ")
+  elif e.key == KeyF3:
+    # What every other editor puts there, and the reason `next` and `prev`
+    # do not have to be typed to walk a search. Moving the finger while a
+    # replace was asking about a match would answer for a different one,
+    # so it withdraws the question like any other command.
+    app.endExchange()
+    gotoNextMatch(app.buffers, app.current, app.finder,
+                  ShiftPressed in e.mods, app.theme, app.tabs.note)
+    app.focus = gEditorCell
+  elif cmd and e.key == KeyW:
+    # Close the current tab by deleting its line, so that it goes through
+    # the tab list's undo stack like a hand-made deletion would.
+    app.tabs.ed.gotoLine(app.current + 1, 0)
+    app.tabs.ed.deleteLine()
+  elif cmd and e.key in {KeyEqual, KeyPlus, KeyMinus}:
+    app.adjustFocusedFontSize(if e.key == KeyMinus: -1 else: 1)
+  elif cmd and e.key in {Key1 .. Key9} and app.focus.isEditor and
+       "clipboard" in cells:
+    # The panel is numbered, so a row is taken by its number rather than by
+    # being selected first. Nothing has to be up, nothing has to be aimed
+    # at, and the arrow keys stay where they belong.
+    let text = app.clips.entry(ord(e.key) - ord(Key1) + 1)
+    if text.len > 0: app.buffers[app.current].ed.insertText(text)
+  elif cmd and e.key == KeySpace and app.focus.isEditor:
+    app.comp.show(app.words, app.buffers[app.current].ed)
+    if not app.comp.active:
+      app.tabs.note = if app.comp.prefix.len > 0:
+                        "no word starts with '" & app.comp.prefix & "'"
+                      else: "no words indexed yet"
+  elif app.focus.isEditor and
+       app.comp.handleKey(e, app.buffers[app.current].ed):
+    # While the listing is up a few keys belong to it. Everything else --
+    # letters, backspace, the arrows sideways -- goes to the editor as
+    # usual and narrows the listing through the prefix.
+    let pick = app.comp.chosen
+    if pick >= 0 and pick < app.jumps.len:
+      # A listing of places rather than of words: taking a row goes there.
+      jumpTo(app.jumps[pick], app.buffers, app.current, app.editorFont,
+             app.focus, app.tabs.note)
+      app.jumps.setLen 0
+  elif e.key == KeyEnter and app.focus == "tabs":
+    # Enter activates a tab instead of inserting a newline.
+    let idx = app.tabs.ed.currentLine
+    if idx < app.buffers.len:
+      app.current = idx
+      app.showInActivePanel()
+      app.focus = gEditorCell
+  elif e.key == KeyEnter and app.focus == "explorer":
+    app.explorerEnter()
+  else:
+    return
+  e = default Event
+
+proc handleEvent(app: var App; e: var Event; cells: Table[string, Rect]) =
+  case e.kind
+  of QuitEvent, WindowCloseEvent:
+    app.running = false
+  of WindowResizeEvent, WindowMetricsEvent:
+    app.width = e.x
+    app.height = e.y
+    if e.kind == WindowMetricsEvent and e.uiScale > 0 and
+       e.uiScale != gUiScale:
+      gUiScale = e.uiScale
+      app.reopenFonts()
+  of MouseMoveEvent:
+    app.pointerX = e.x
+    app.pointerY = e.y
+  of MouseWheelEvent:
+    # Consumed, so the focused panel does not scroll along with the one under
+    # the pointer.
+    app.wheelPanel(cells.hitTest(app.pointerX, app.pointerY).name, e.y)
+    e = default Event
+  of MouseDownEvent:
+    app.pointerX = e.x
+    app.pointerY = e.y
+    app.comp.dismiss()
+    let hit = cells.hitTest(e.x, e.y)
+    if hit.name.len > 0:
+      app.focus = hit.name
+  of TextInputEvent:
+    # Ctrl+Space, Ctrl+<digit> and Ctrl+<letter> are commands, not text. X11
+    # hands the app both, and the character would land in the buffer right
+    # where the paste is about to go -- or, for a letter, as the control
+    # character it stands for; the key event has already dealt with it.
+    if CtrlPressed in e.mods and e.text[1] == '\0' and
+       (e.text[0] in {' ', '1'..'9'} or e.text[0] < ' '):
+      e = default Event
+  of KeyDownEvent:
+    app.handleKey(e, cells)
+  else: discard
+
+proc pressPanelButtons(app: var App; e: var Event;
+                       cells: Table[string, Rect]) =
+  ## The panel the pointer is in offers three buttons in its top right
+  ## corner. Tested before a single widget is drawn, and the event is taken
+  ## away when one of them is hit: a click on a button is not also a click in
+  ## the text under it.
+  app.btnSize = max(scaledPx(9), app.fm.lineHeight - scaledPx(3))
+  let over = cells.hitTest(app.pointerX, app.pointerY)
+  if over.name.len == 0:
+    app.buttons = PanelButtons()
+  else:
+    app.buttons = PanelButtons(cell: over.name, hot: btnNone,
                                splits: over.name.isEditor or
                                        over.name.isTerminal)
-        buttons.hot = buttons.buttonAt(cells[over.name], btnSize,
-                                       pointerX, pointerY)
-      if e.kind == MouseDownEvent and e.button == LeftButton and
-         buttons.hot != btnNone:
-        case buttons.hot
-        of btnRight, btnDown: splitPanelAt(buttons.cell, buttons.hot == btnRight)
-        of btnClose: closePanelAt(buttons.cell)
-        of btnNone: discard
-        buttons.hot = btnNone
-        e = default Event
+    app.buttons.hot = app.buttons.buttonAt(cells[over.name], app.btnSize,
+                                           app.pointerX, app.pointerY)
+  if e.kind == MouseDownEvent and e.button == LeftButton and
+     app.buttons.hot != btnNone:
+    let cell = app.buttons.cell
+    case app.buttons.hot
+    of btnRight, btnDown: app.splitPanelAt(cell, app.buttons.hot == btnRight)
+    of btnClose: app.closePanelAt(cell)
+    of btnNone: discard
+    app.buttons.hot = btnNone
+    e = default Event
 
-    # Widgets the layout leaves out are simply not drawn. They keep their
-    # state, so they come back exactly as they were once a layout lists
-    # them again.
+proc followActiveTab(app: var App) =
+  ## The list follows the active tab, which is chosen anywhere but here:
+  ## Ctrl+W, a file opened from the explorer, a jump to a definition. While
+  ## the list has the focus its own caret leads and the view goes with it --
+  ## the arrows are for reading down the list, and a list that snapped back
+  ## after every one of them could not be read. The moment it has not, the
+  ## row that matters is the active tab again, so it goes to the middle,
+  ## where it can be seen along with what is around it.
+  ##
+  ## The caret goes with it, rather than the view alone: it is where the
+  ## arrow keys will start from when the list is next stepped into, and
+  ## leaving it behind would make the first keystroke there jump the view
+  ## back to wherever the list had been left.
+  let focused = app.focus == "tabs"
+  if app.current == app.shownTab and focused == app.tabsHadFocus: return
+  if not focused and app.current < app.tabs.names.len:
+    app.tabs.ed.gotoLine(app.current + 1, 0)
+    app.tabs.ed.centerLine(app.current)
+  # Not counted as done until the list has been drawn once: before that it
+  # has no height, so there is no middle to put anything in yet.
+  if app.tabs.ed.span > 0:
+    app.shownTab = app.current
+    app.tabsHadFocus = focused
 
-    # Tab list -- its lines ARE the open tabs. The bookkeeping runs even when
-    # the list is hidden, because Ctrl+W still edits its buffer.
-    if tabs.names != displayNames(buffers): renderTabs(tabs, buffers)
-    decorateTabs(tabs, buffers, current)
-    # The list follows the active tab, which is chosen anywhere but here:
-    # Ctrl+W, a file opened from the explorer, a jump to a definition. While
-    # the list has the focus its own caret leads and the view goes with it --
-    # the arrows are for reading down the list, and a list that snapped back
-    # after every one of them could not be read. The moment it has not, the
-    # row that matters is the active tab again, so it goes to the middle,
-    # where it can be seen along with what is around it.
-    #
-    # The caret goes with it, rather than the view alone: it is where the
-    # arrow keys will start from when the list is next stepped into, and
-    # leaving it behind would make the first keystroke there jump the view
-    # back to wherever the list had been left.
-    let tabsFocused = focus == "tabs"
-    if "tabs" in cells and
-       (current != shownTab or tabsFocused != tabsHadFocus):
-      if not tabsFocused and current < tabs.names.len:
-        tabs.ed.gotoLine(current + 1, 0)
-        tabs.ed.centerLine(current)
-      # Not counted as done until the list has been drawn once: before that it
-      # has no height, so there is no middle to put anything in yet.
-      if tabs.ed.span > 0:
-        shownTab = current
-        tabsHadFocus = tabsFocused
-    var tabAct = EditAction(kind: noAction)
-    if "tabs" in cells:
-      tabAct = tabs.ed.draw(e, cells["tabs"], focus == "tabs")
-    if tabAct.kind == closeLine:
-      # The (x) deletes the line, so closing by button and closing by hand
-      # end up in the same undo stack.
-      tabs.ed.gotoLine(tabAct.line + 1, 0)
-      tabs.ed.deleteLine()
-    applyTabEdits(tabs, buffers, current, fonts.fontForSize(editorFontSize))
-    if e.kind == MouseDownEvent and focus == "tabs" and
-       tabAct.kind != closeLine:
-      let idx = tabs.ed.currentLine
-      if idx < buffers.len:
-        current = idx
-        # The tab list picks the file for the panel the keystrokes were going
-        # to, and leaves the other panels showing what they were showing.
-        showInActivePanel()
-        focus = gEditorCell
+proc drawTabs(app: var App; e: Event; cells: Table[string, Rect]) =
+  ## The tab list -- its lines ARE the open tabs. The bookkeeping runs even
+  ## when the list is hidden, because Ctrl+W still edits its buffer.
+  if app.tabs.names != displayNames(app.buffers):
+    renderTabs(app.tabs, app.buffers)
+  decorateTabs(app.tabs, app.buffers, app.current)
+  var act = EditAction(kind: noAction)
+  if "tabs" in cells:
+    app.followActiveTab()
+    act = app.tabs.ed.draw(e, cells["tabs"], app.focus == "tabs")
+  if act.kind == closeLine:
+    # The (x) deletes the line, so closing by button and closing by hand
+    # end up in the same undo stack.
+    app.tabs.ed.gotoLine(act.line + 1, 0)
+    app.tabs.ed.deleteLine()
+  applyTabEdits(app.tabs, app.buffers, app.current, app.editorFont)
+  if e.kind == MouseDownEvent and app.focus == "tabs" and
+     act.kind != closeLine:
+    let idx = app.tabs.ed.currentLine
+    if idx < app.buffers.len:
+      app.current = idx
+      # The tab list picks the file for the panel the keystrokes were going
+      # to, and leaves the other panels showing what they were showing.
+      app.showInActivePanel()
+      app.focus = gEditorCell
 
-    # Explorer -- flat directory listing, line 0 is the path/filter field
-    let exFocused = focus == "explorer"
-    if "explorer" in cells:
-      discard explorer.ed.draw(e, cells["explorer"], exFocused)
-      if exFocused:
-        if e.kind == MouseDownEvent:
-          let line = explorer.ed.currentLine
-          if line > 0 and line - 1 < explorer.entries.len:
-            explorer.activateEntry(line - 1, buffers, current,
-                                   fonts.fontForSize(editorFontSize), focus,
-                                   term.cwd, tabs.note)
-        else:
-          let header = explorer.ed.getLineText(0)
-          if header != explorer.header:
-            explorer.applyHeader(header)
-          elif explorer.ed.getLineCount() != explorer.entries.len + 1:
-            # The listing itself is not editable; put it back.
-            explorer.renderExplorer(explorer.header, explorer.ed.cursor)
+proc drawExplorer(app: var App; e: Event; area: Rect) =
+  ## The explorer -- a flat directory listing, line 0 is the path/filter
+  ## field.
+  let focused = app.focus == "explorer"
+  discard app.explorer.ed.draw(e, area, focused)
+  if not focused: return
+  if e.kind == MouseDownEvent:
+    let line = app.explorer.ed.currentLine
+    if line > 0 and line - 1 < app.explorer.entries.len:
+      app.explorer.activateEntry(line - 1, app.buffers, app.current,
+                                 app.editorFont, app.focus, app.term.cwd,
+                                 app.tabs.note)
+  else:
+    let header = app.explorer.ed.getLineText(0)
+    if header != app.explorer.header:
+      app.explorer.applyHeader(header)
+    elif app.explorer.ed.getLineCount() != app.explorer.entries.len + 1:
+      # The listing itself is not editable; put it back.
+      app.explorer.renderExplorer(app.explorer.header, app.explorer.ed.cursor)
 
-    # The window title says which buffer is in the editor, out of the same
-    # names the tab list shows -- so the two cannot disagree, and a name that
-    # had to be made unique ("doc/config.md") is unique in the title too.
-    #
-    # Driven by what *is* current rather than set wherever something gets
-    # opened: the current buffer also changes by switching tabs, by closing
-    # one, and by undoing that, and none of those go through an open.
-    let title = if current < tabs.names.len: tabs.names[current] else: ""
-    if title != lastTitle:
-      lastTitle = title
-      setWindowTitle(if title.len > 0: "focim - " & title else: "focim")
+proc followCurrent(app: var App) =
+  ## The window title says which buffer is in the editor, out of the same
+  ## names the tab list shows -- so the two cannot disagree, and a name that
+  ## had to be made unique ("doc/config.md") is unique in the title too.
+  ##
+  ## Driven by what *is* current rather than set wherever something gets
+  ## opened: the current buffer also changes by switching tabs, by closing
+  ## one, and by undoing that, and none of those go through an open.
+  let title =
+    if app.current < app.tabs.names.len: app.tabs.names[app.current] else: ""
+  if title != app.lastTitle:
+    app.lastTitle = title
+    setWindowTitle(if title.len > 0: "focim - " & title else: "focim")
+  # The explorer follows the directory of the active file.
+  if app.current != app.lastCurrent:
+    app.lastCurrent = app.current
+    let p = app.buffers[app.current].path
+    if p.len > 0 and normDir(p.parentDir) != app.explorer.dir:
+      app.explorer.showDir(p.parentDir)
 
-    # The explorer follows the directory of the active file.
-    if current != lastCurrent:
-      lastCurrent = current
-      let p = buffers[current].path
-      if p.len > 0 and normDir(p.parentDir) != explorer.dir:
-        explorer.showDir(p.parentDir)
+proc drawBranches(app: var App; e: Event; area: Rect) =
+  ## The branch list -- the branches of the current file's repository. It
+  ## follows the current file the way the explorer does, and is asked again
+  ## on the disk check for the branches somebody made or switched in the
+  ## terminal.
+  template bl: untyped = app.branches
+  let file = app.buffers[app.current].path
+  if file != bl.file:
+    discard bl.refreshBranches(file)
+  decorateBranches(bl)
+  let focused = app.focus == "branches"
+  let act = bl.ed.draw(e, area, focused)
+  if act.kind == closeLine:
+    discard bl.actOnBranch(act.line, delete = true, app.tabs.note)
+  elif e.kind == MouseDownEvent and focused and e.button == LeftButton and
+       e.clicks == 1 and e.x < area.x + area.w - ScrollBarWidth:
+    # The row under the pointer and not the caret's: a click below the last
+    # branch puts the caret on it, and must not check it out.
+    let lineH = fontLineSkip(bl.ed.getFont)
+    let row = if lineH > 0:
+                bl.ed.firstLine.int + (e.y - area.y - bl.ed.padding.y) div lineH
+              else: -1
+    if e.y - area.y >= bl.ed.padding.y and row < bl.branches.names.len:
+      if bl.actOnBranch(row, delete = false, app.tabs.note):
+        # The files under the tabs are another branch's now; ask the disk at
+        # once rather than in a couple of seconds.
+        app.nextDiskCheck = 0
+      app.focus = gEditorCell
+  elif bl.ed.fullText != bl.text:
+    # Typed into: a branch is git's, not the list's, so it goes back.
+    bl.renderBranches()
 
-    # Editor panels. The focused one is drawn last and its seat is left in
-    # the buffer, because everything after this -- the completion listing, the
-    # status line, the next frame's keystrokes -- means that panel's caret.
-    # The others borrow the buffer they show across their own `draw` and give
-    # it straight back.
-    var edAct = EditAction(kind: noAction)
-    for i in 0 ..< editors.len:
-      if editors[i].cell notin cells: continue
-      let b = buffers.indexOfId(editors[i].buf)
-      if b < 0:
-        # The file this panel was showing has been closed. It shows what the
-        # active panel shows rather than nothing: a blank panel with no way to
-        # put anything in it would be a hole in the window.
-        editors[i].buf = buffers[current].id
-        continue
-      if i == activeEditor: continue
-      buffers[b].ed.enter editors[i].slot
-      discard buffers[b].ed.draw(e, cells[editors[i].cell], false)
-      # Handed back at once when it is the buffer the focused panel is in:
-      # from here to the end of the frame, `buffers[current].ed` has to mean
-      # that panel's caret.
-      if b == current: buffers[b].ed.enter editors[activeEditor].slot
-    if editors.len > 0 and editors[activeEditor].cell in cells:
-      edAct = buffers[current].ed.draw(e, cells[editors[activeEditor].cell],
-                                       focus == editors[activeEditor].cell)
-    case edAct.kind
-    of ctrlClick:
-      if buffers[current].ed.lang == langMarkdown:
-        handleMarkdownCtrlClick(buffers[current].ed, edAct.pos, buffers,
-                                current, fonts.fontForSize(editorFontSize),
-                                focus, tabs.note, explorer)
-      elif buffers[current].ed.lang == langNim:
-        # Where is this name? Only a compiler knows, so one is asked -- and the
-        # answer arrives some frames from now, at the top of the loop.
-        startTrack(tracker, trackSpec, buffers[current].ed, edAct.pos,
-                   buffers[current].path, tabs.note)
-    of ctrlHover:
-      if buffers[current].ed.lang == langMarkdown:
-        let (_, a, b) = buffers[current].ed.markdownLinkAt(edAct.pos)
-        buffers[current].ed.underline(a, b)
-      elif buffers[current].ed.lang == langNim:
-        # The name under the pointer is what the click would ask about, so it
-        # is what gets underlined -- the same promise the markdown links make.
-        let (word, a, b) = buffers[current].ed.wordAt(edAct.pos)
-        if word.len > 0: buffers[current].ed.underline(a, b)
-        else: buffers[current].ed.underline(-1, -1)
-    of closeLine:
-      discard # the editor has no close buttons
-    of noAction:
-      buffers[current].ed.underline(-1, -1)
+proc drawEditors(app: var App; e: Event;
+                 cells: Table[string, Rect]): EditAction =
+  ## The editor panels. The focused one is drawn last and its seat is left in
+  ## the buffer, because everything after this -- the completion listing, the
+  ## status line, the next frame's keystrokes -- means that panel's caret.
+  ## The others borrow the buffer they show across their own `draw` and give
+  ## it straight back. Answers with what the focused one was asked to do.
+  result = EditAction(kind: noAction)
+  for i in 0 ..< app.editors.len:
+    if app.editors[i].cell notin cells: continue
+    let b = app.buffers.indexOfId(app.editors[i].buf)
+    if b < 0:
+      # The file this panel was showing has been closed. It shows what the
+      # active panel shows rather than nothing: a blank panel with no way to
+      # put anything in it would be a hole in the window.
+      app.editors[i].buf = app.buffers[app.current].id
+      continue
+    if i == app.activeEditor: continue
+    app.buffers[b].ed.enter app.editors[i].slot
+    discard app.buffers[b].ed.draw(e, cells[app.editors[i].cell], false)
+    # Handed back at once when it is the buffer the focused panel is in:
+    # from here to the end of the frame, `buffers[current].ed` has to mean
+    # that panel's caret.
+    if b == app.current:
+      app.buffers[b].ed.enter app.editors[app.activeEditor].slot
+  if app.editors.len > 0 and app.editors[app.activeEditor].cell in cells:
+    let cell = app.editors[app.activeEditor].cell
+    result = app.buffers[app.current].ed.draw(e, cells[cell],
+                                              app.focus == cell)
 
-    # Clipboard panel -- what the clipboard held, newest first. Drawn only when
-    # the layout shows it, which is the same thing Ctrl+<digit> checks: a row
-    # nobody can read is a row nobody can pick a number out of.
-    if "clipboard" in cells:
-      let clipAct = clips.draw(e, cells["clipboard"], focus == "clipboard")
-      if clipAct.drop > 0:
-        # The (x) forgets an entry -- which is how a password copied by mistake
-        # stops being one keystroke away from every buffer.
-        clips.drop clipAct.drop
-      elif clipAct.take > 0:
-        # Clicking a row pastes it and hands the caret straight back: nobody
-        # clicks a clipping in order to end up in the panel.
-        buffers[current].ed.insertText(clips.entry(clipAct.take))
-        focus = gEditorCell
+proc runEditAction(app: var App; act: EditAction) =
+  ## What a Ctrl+click or a Ctrl+hover in the editor means: a link to follow
+  ## in markdown, a name to look up in Nim.
+  template ed: untyped = app.buffers[app.current].ed
+  case act.kind
+  of ctrlClick:
+    if ed.lang == langMarkdown:
+      handleMarkdownCtrlClick(ed, act.pos, app.buffers, app.current,
+                              app.editorFont, app.focus, app.tabs.note,
+                              app.explorer)
+    elif ed.lang == langNim:
+      # Where is this name? Only a compiler knows, so one is asked -- and the
+      # answer arrives some frames from now, in `pollTracker`.
+      startTrack(app.tracker, app.trackSpec, ed, act.pos,
+                 app.buffers[app.current].path, app.tabs.note)
+  of ctrlHover:
+    if ed.lang == langMarkdown:
+      let (_, a, b) = ed.markdownLinkAt(act.pos)
+      ed.underline(a, b)
+    elif ed.lang == langNim:
+      # The name under the pointer is what the click would ask about, so it
+      # is what gets underlined -- the same promise the markdown links make.
+      let (word, a, b) = ed.wordAt(act.pos)
+      if word.len > 0: ed.underline(a, b)
+      else: ed.underline(-1, -1)
+  of closeLine:
+    discard # the editor has no close buttons
+  of noAction:
+    ed.underline(-1, -1)
 
-    # History panel -- its lines ARE the command list, so a click re-runs a line
-    # and the (x) deletes one. The ingest runs even when the layout leaves the
-    # panel out, so nothing typed while it was hidden goes missing.
-    for i in 0 ..< terms.len:
-      for cmd in terms[i].term.ran: history.addHistoryLine(cmd)
-      terms[i].term.ran.setLen 0
-    if "history" in cells:
-      let histAct = history.draw(e, cells["history"], focus == "history")
-      if histAct.kind == closeLine:
-        # Same as the tab list: the button deletes the line, so closing by
-        # button and closing by hand share one undo stack.
-        history.gotoLine(histAct.line + 1, 0)
-        history.deleteLine()
-      elif e.kind == MouseDownEvent and focus == "history":
-        # Only a click on the row itself re-runs it: the (x) took the branch
-        # above and must not activate what it is removing.
-        var cmd = history.getLineText(history.currentLine)
-        if cmd.len > 0:
-          discard term.runCommand(cmd)
-          focus = gTerminalCell
+proc drawClipboard(app: var App; e: Event; area: Rect) =
+  ## The clipboard panel -- what the clipboard held, newest first. Drawn only
+  ## when the layout shows it, which is the same thing Ctrl+<digit> checks: a
+  ## row nobody can read is a row nobody can pick a number out of.
+  let act = app.clips.draw(e, area, app.focus == "clipboard")
+  if act.drop > 0:
+    # The (x) forgets an entry -- which is how a password copied by mistake
+    # stops being one keystroke away from every buffer.
+    app.clips.drop act.drop
+  elif act.take > 0:
+    # Clicking a row pastes it and hands the caret straight back: nobody
+    # clicks a clipping in order to end up in the panel.
+    app.buffers[app.current].ed.insertText(app.clips.entry(act.take))
+    app.focus = gEditorCell
 
-    # Terminal panels. Every one of them is drawn; what one of them *says* is
-    # acted on only when it is the panel being typed in, since a command is
-    # something somebody typed.
-    var termAct = TermAction(kind: noAction)
-    for i in 0 ..< terms.len:
-      if terms[i].cell notin cells: continue
-      let focused = focus == terms[i].cell
-      let a = terms[i].term.draw(e, cells[terms[i].cell], focused)
-      if focused:
-        activeTerm = i
-        gTerminalCell = terms[i].cell
-        termAct = a
-    endExchange(termAct)
-    case termAct.kind
-    of openFile:
-      runOpenCommand(termAct, term.base, buffers, current,
-                     fonts.fontForSize(editorFontSize), focus, explorer,
-                     tabs.note)
-    of saveFile:
-      runSave(termAct, asked, buffers, current, tabs.note)
-      # A command typed here may still end in a question, and the question is
-      # put in the prompt -- so that is where the caret goes to answer it.
-      if asked.question.len > 0: focus = "status"
-    of searchText:
-      runSearch(termAct, asked, finder, buffers, current, theme, tabs.note)
-      if asked.question.len > 0: focus = "status"
-    of gotoMatch:
-      gotoNextMatch(buffers, current, finder, termAct.backwards, theme,
-                    tabs.note)
-    of answer:
-      # Unreachable: only the prompt is ever armed with a question.
-      discard
-    of indexWords:
-      runIndexCommand(termAct, words, job, tabs.note)
-    of resetConfig, selectTheme, splitPanel, closePanel:
-      # Unreachable: `defaults`, `theme` and the panel commands are the
-      # prompt's, and this is the terminal -- there the words are programs'
-      # names.
-      discard
-    of ctrlHover:
-      let (_, _, _, a, b) = term.ed.extractFilePosition(termAct.pos)
-      term.ed.underline(a, b)
-    of ctrlClick:
-      term.ed.underline(-1, -1)
-      handleTermCtrlClick(term.ed, termAct.pos, buffers, current,
-                          fonts.fontForSize(editorFontSize), term, focus)
-    of noAction:
-      term.ed.underline(-1, -1)
+proc drawHistory(app: var App; e: Event; cells: Table[string, Rect]) =
+  ## The history panel -- its lines ARE the command list, so a click re-runs
+  ## a line and the (x) deletes one. The ingest runs even when the layout
+  ## leaves the panel out, so nothing typed while it was hidden goes missing.
+  for t in app.terms.mitems:
+    for cmd in t.term.ran: app.history.addHistoryLine(cmd)
+    t.term.ran.setLen 0
+  if "history" notin cells: return
+  let act = app.history.draw(e, cells["history"], app.focus == "history")
+  if act.kind == closeLine:
+    # Same as the tab list: the button deletes the line, so closing by
+    # button and closing by hand share one undo stack.
+    app.history.gotoLine(act.line + 1, 0)
+    app.history.deleteLine()
+  elif e.kind == MouseDownEvent and app.focus == "history":
+    # Only a click on the row itself re-runs it: the (x) took the branch
+    # above and must not activate what it is removing.
+    var cmd = app.history.getLineText(app.history.currentLine)
+    if cmd.len > 0:
+      discard app.term.runCommand(cmd)
+      app.focus = gTerminalCell
 
-    # Status bar / prompt -- update prefix when not focused
-    # A lane that does not parse is the more urgent of the two notes: it is
-    # what the user is looking at while typing in that tab.
-    let note = laneNote(laneNotes, tabs.note)
-    if focus != "status":
-      updateStatus(status, buffers[current].ed, buffers[current].path, note)
-    var statusAct = TermAction(kind: noAction)
-    if "status" in cells:
-      statusAct = status.draw(e, cells["status"], focus == "status")
-    template redrawStatus() =
-      # The command has just changed what the line says about the buffer, and
-      # the prompt it left behind belongs to a terminal, not to a status bar.
-      updateStatus(status, buffers[current].ed, buffers[current].path,
-                   laneNote(laneNotes, tabs.note))
-    endExchange(statusAct)
-    case statusAct.kind
-    of openFile:
-      runOpenCommand(statusAct, status.base, buffers, current,
-                     fonts.fontForSize(editorFontSize), focus, explorer,
-                     tabs.note)
-      redrawStatus()
-    of saveFile:
-      runSave(statusAct, asked, buffers, current, tabs.note)
-      # A question keeps the focus here: the answer is typed into the line the
-      # question is shown in. Anything else is finished with, and the caret
-      # belongs back in the text.
-      if asked.question.len == 0: focus = gEditorCell
-      redrawStatus()
-    of searchText:
-      runSearch(statusAct, asked, finder, buffers, current, theme, tabs.note)
-      if asked.question.len == 0: focus = gEditorCell
-      redrawStatus()
-    of gotoMatch:
-      gotoNextMatch(buffers, current, finder, statusAct.backwards, theme,
-                    tabs.note)
-      focus = gEditorCell
-      redrawStatus()
-    of answer:
-      asked.question = runAnswer(statusAct.word, asked, finder, buffers,
-                                 current, theme, tabs.note)
-      if asked.question.len == 0: focus = gEditorCell
-      redrawStatus()
-    of indexWords:
-      runIndexCommand(statusAct, words, job, tabs.note)
-    of resetConfig:
-      runDefaults(buffers, tabs.note)
-      redrawStatus()
-    of selectTheme:
-      runTheme(statusAct.name, buffers, tabs.note)
-      redrawStatus()
-    of splitPanel:
-      # The panel the keystrokes were going to before they came here to be
-      # typed: a command about the editor means the editor you were in.
-      splitPanelAt(gEditorCell, statusAct.sideways)
-    of closePanel:
-      closePanelAt(gEditorCell)
-    of ctrlHover, ctrlClick, noAction: discard
+proc runTermAction(app: var App; act: TermAction) =
+  ## What a command typed into the terminal panel asks of the editor.
+  case act.kind
+  of openFile:
+    runOpenCommand(act, app.term.base, app.buffers, app.current,
+                   app.editorFont, app.focus, app.explorer, app.tabs.note)
+  of saveFile:
+    runSave(act, app.asked, app.buffers, app.current, app.tabs.note)
+    # A command typed here may still end in a question, and the question is
+    # put in the prompt -- so that is where the caret goes to answer it.
+    if app.asked.question.len > 0: app.focus = "status"
+  of searchText:
+    runSearch(act, app.asked, app.finder, app.buffers, app.current, app.theme,
+              app.tabs.note)
+    if app.asked.question.len > 0: app.focus = "status"
+  of gotoMatch:
+    gotoNextMatch(app.buffers, app.current, app.finder, act.backwards,
+                  app.theme, app.tabs.note)
+  of answer:
+    # Unreachable: only the prompt is ever armed with a question.
+    discard
+  of indexWords:
+    runIndexCommand(act, app.words, app.job, app.tabs.note)
+  of resetConfig, selectTheme, splitPanel, closePanel:
+    # Unreachable: `defaults`, `theme` and the panel commands are the
+    # prompt's, and this is the terminal -- there the words are programs'
+    # names.
+    discard
+  of ctrlHover:
+    let (_, _, _, a, b) = app.term.ed.extractFilePosition(act.pos)
+    app.term.ed.underline(a, b)
+  of ctrlClick:
+    app.term.ed.underline(-1, -1)
+    handleTermCtrlClick(app.term.ed, act.pos, app.buffers, app.current,
+                        app.editorFont, app.term, app.focus)
+  of noAction:
+    app.term.ed.underline(-1, -1)
 
-    # The completion listing, last: it goes over everything, and it can only
-    # be placed once the editor has drawn the caret it hangs from.
-    if editors.len > 0 and editors[activeEditor].cell in cells:
-      comp.draw(words, buffers[current].ed, cells[editors[activeEditor].cell],
-                focus.isEditor)
+proc drawTerminals(app: var App; e: Event; cells: Table[string, Rect]) =
+  ## Every terminal panel is drawn; what one of them *says* is acted on only
+  ## when it is the panel being typed in, since a command is something
+  ## somebody typed.
+  var act = TermAction(kind: noAction)
+  for i in 0 ..< app.terms.len:
+    if app.terms[i].cell notin cells: continue
+    let focused = app.focus == app.terms[i].cell
+    let a = app.terms[i].term.draw(e, cells[app.terms[i].cell], focused)
+    if focused:
+      app.activeTerm = i
+      gTerminalCell = app.terms[i].cell
+      act = a
+  app.endExchange(act)
+  app.runTermAction(act)
 
-    # The buttons of the panel the pointer is in, over its content and under
-    # nothing: a panel is split and closed from where it is, and a button that
-    # took a corner of the text away permanently would cost every panel a
-    # corner for the sake of the two seconds it is wanted.
-    if buttons.cell.len > 0 and buttons.cell in cells:
-      drawPanelButtons(buttons, cells[buttons.cell], btnSize, theme)
+proc redrawStatus(app: var App) =
+  ## The command has just changed what the line says about the buffer, and
+  ## the prompt it left behind belongs to a terminal, not to a status bar.
+  updateStatus(app.status, app.buffers[app.current].ed,
+               app.buffers[app.current].path,
+               laneNote(app.laneNotes, app.tabs.note))
 
-    # Which panel the next keystroke goes to, said once and in one place. The
-    # frame lands in the gap the layout leaves between the cells -- half of it
-    # per side, so two neighbours cannot both claim the same pixel -- and
-    # therefore takes no room from the widget and cannot move its text.
-    template frameCell(name: string) =
-      if name in cells:
-        # Clamped to the window: a cell against an edge has no gap on that
-        # side, and a frame drawn past it would simply not be there.
-        let f = cells[name]
-        let fw = scaledPx(2)
-        let x0 = max(0, f.x - fw)
-        let y0 = max(0, f.y - fw)
-        let x1 = min(width - 1, f.x + f.w - 1 + fw)
-        let y1 = min(height - 1, f.y + f.h - 1 + fw)
-        drawFrame(rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1), theme.focusColor, fw)
+proc runStatusAction(app: var App; act: TermAction) =
+  ## What a command typed into the prompt asks for. A question keeps the
+  ## focus there: the answer is typed into the line the question is shown in.
+  ## Anything else is finished with, and the caret belongs back in the text.
+  template backToText() =
+    if app.asked.question.len == 0: app.focus = gEditorCell
+  case act.kind
+  of openFile:
+    runOpenCommand(act, app.status.base, app.buffers, app.current,
+                   app.editorFont, app.focus, app.explorer, app.tabs.note)
+  of saveFile:
+    runSave(act, app.asked, app.buffers, app.current, app.tabs.note)
+    backToText()
+  of searchText:
+    runSearch(act, app.asked, app.finder, app.buffers, app.current, app.theme,
+              app.tabs.note)
+    backToText()
+  of gotoMatch:
+    gotoNextMatch(app.buffers, app.current, app.finder, act.backwards,
+                  app.theme, app.tabs.note)
+    app.focus = gEditorCell
+  of answer:
+    app.asked.question = runAnswer(act.word, app.asked, app.finder,
+                                   app.buffers, app.current, app.theme,
+                                   app.tabs.note)
+    backToText()
+  of indexWords:
+    runIndexCommand(act, app.words, app.job, app.tabs.note)
+    return
+  of resetConfig:
+    runDefaults(app.buffers, app.tabs.note)
+  of selectTheme:
+    runTheme(act.name, app.buffers, app.tabs.note)
+  of splitPanel:
+    # The panel the keystrokes were going to before they came here to be
+    # typed: a command about the editor means the editor you were in.
+    app.splitPanelAt(gEditorCell, act.sideways)
+    return
+  of closePanel:
+    app.closePanelAt(gEditorCell)
+    return
+  of ctrlHover, ctrlClick, noAction:
+    return
+  app.redrawStatus()
 
-    frameCell focus
-    # The tab list is framed along with the editor, not instead of it: it is
-    # less a panel of its own than the editor's label, and the row it marks is
-    # the buffer the keystrokes are landing in. Lighting up both says where
-    # the text goes and which of the open files it goes into, in one glance.
-    if focus.isEditor: frameCell "tabs"
+proc drawStatus(app: var App; e: Event; cells: Table[string, Rect]) =
+  ## The status bar / prompt -- the line about the buffer is rewritten on
+  ## every frame it is not being typed in. A lane that does not parse is the
+  ## more urgent of the two notes: it is what the user is looking at while
+  ## typing in that tab.
+  if app.focus != "status":
+    app.redrawStatus()
+  var act = TermAction(kind: noAction)
+  if "status" in cells:
+    act = app.status.draw(e, cells["status"], app.focus == "status")
+  app.endExchange(act)
+  app.runStatusAction(act)
 
-    # Persist the session once everything that could have changed it has run.
-    let tt = tabsText(buffers)
-    if tt != savedTabs:
-      savedTabs = tt
-      saveConfig("tabs.txt", tt)
+proc frameCell(app: App; cells: Table[string, Rect]; name: string) =
+  ## Which panel the next keystroke goes to, said once and in one place. The
+  ## frame lands in the gap the layout leaves between the cells -- half of it
+  ## per side, so two neighbours cannot both claim the same pixel -- and
+  ## therefore takes no room from the widget and cannot move its text.
+  if name notin cells: return
+  # Clamped to the window: a cell against an edge has no gap on that side,
+  # and a frame drawn past it would simply not be there.
+  let f = cells[name]
+  let fw = scaledPx(2)
+  let x0 = max(0, f.x - fw)
+  let y0 = max(0, f.y - fw)
+  let x1 = min(app.width - 1, f.x + f.w - 1 + fw)
+  let y1 = min(app.height - 1, f.y + f.h - 1 + fw)
+  drawFrame(rect(x0, y0, x1 - x0 + 1, y1 - y0 + 1), app.theme.focusColor, fw)
+
+proc drawOverlays(app: var App; cells: Table[string, Rect]) =
+  # The completion listing, last: it goes over everything, and it can only
+  # be placed once the editor has drawn the caret it hangs from.
+  if app.editors.len > 0 and app.editors[app.activeEditor].cell in cells:
+    app.comp.draw(app.words, app.buffers[app.current].ed,
+                  cells[app.editors[app.activeEditor].cell],
+                  app.focus.isEditor)
+  # The buttons of the panel the pointer is in, over its content and under
+  # nothing: a panel is split and closed from where it is, and a button that
+  # took a corner of the text away permanently would cost every panel a
+  # corner for the sake of the two seconds it is wanted.
+  if app.buttons.cell.len > 0 and app.buttons.cell in cells:
+    drawPanelButtons(app.buttons, cells[app.buttons.cell], app.btnSize,
+                     app.theme)
+  app.frameCell(cells, app.focus)
+  # The tab list is framed along with the editor, not instead of it: it is
+  # less a panel of its own than the editor's label, and the row it marks is
+  # the buffer the keystrokes are landing in. Lighting up both says where
+  # the text goes and which of the open files it goes into, in one glance.
+  if app.focus.isEditor: app.frameCell(cells, "tabs")
+
+proc renderFrame(app: var App; e: var Event) =
+  let lm = layoutMetrics(app.width, app.height, app.fm.lineHeight)
+  app.dragBorders(e, lm)
+
+  let cells = app.layout.resolve(lm)
+  # The panels are whatever the layout says they are: a split writes a cell
+  # into `layout.nif` and this is where that cell becomes a panel, as does
+  # one typed into the file by hand.
+  reconcileEditors(app.editors, app.layout.cellNames, app.buffers,
+                   app.current, app.born)
+  reconcileTerminals(app.terms, app.layout.cellNames,
+                     app.fonts.fontForSize(app.terminalFontSize),
+                     app.panelTheme, app.born)
+  app.born = Newborn()
+  app.pickActivePanels(cells)
+  # A layout may have dropped the cell that had the focus.
+  if app.focus notin cells: app.focus = gEditorCell
+
+  # Fill background -- gaps between cells show this color as borders, so it
+  # comes from the theme: `actionColor` is what the theme already uses to
+  # frame things.
+  fillRect(rect(0, 0, app.width, app.height), app.theme.actionColor)
+  # The border under the pointer, in the colors the theme already keeps for
+  # a thing that is dragged: this is a scrollbar grip by another name, and a
+  # window whose panels can be pushed about has to say so before they are.
+  let grip = if app.dragging.found: app.dragging else: app.hovering
+  if grip.found:
+    fillRect(app.layout.splitterRect(lm, grip),
+             if app.dragging.found: app.theme.scrollBarActiveColor
+             else: app.theme.scrollBarColor)
+
+  app.handleEvent(e, cells)
+  app.pressPanelButtons(e, cells)
+
+  # Widgets the layout leaves out are simply not drawn. They keep their
+  # state, so they come back exactly as they were once a layout lists
+  # them again.
+  app.drawTabs(e, cells)
+  if "explorer" in cells: app.drawExplorer(e, cells["explorer"])
+  app.followCurrent()
+  if "branches" in cells: app.drawBranches(e, cells["branches"])
+  app.runEditAction(app.drawEditors(e, cells))
+  if "clipboard" in cells: app.drawClipboard(e, cells["clipboard"])
+  app.drawHistory(e, cells)
+  app.drawTerminals(e, cells)
+  app.drawStatus(e, cells)
+  app.drawOverlays(cells)
+
+  # Persist the session once everything that could have changed it has run.
+  let tt = tabsText(app.buffers)
+  if tt != app.savedTabs:
+    app.savedTabs = tt
+    saveConfig("tabs.txt", tt)
+
+proc main =
+  var app = initApp()
+  while app.running:
+    var e = app.waitForEvent()
+    app.lookAround()
+    # Everything above was a look; below is the frame. The loop polls far
+    # more often than it draws. Waiting is free, looking at a channel is
+    # nearly free, and drawing this window is neither -- it is a repaint of
+    # every panel and a copy of a screenful of pixels, and on a maximized
+    # window that is the whole cost of the frame. So a turn that woke up with
+    # nothing new to show goes straight back to sleep. An index job's count is
+    # deliberately not among the things that ask for a frame -- a job wants
+    # the time the drawing would take, and twice a second is as often as a
+    # number going up is worth being redrawn for.
+    if not app.mustDraw and getTicks() < app.nextFrame: continue
+    app.mustDraw = false
+    app.renderFrame(e)
 
     # When the next frame is due even if nothing happens between now and
     # then. The caret is what the deadline is for, so a window whose caret has
@@ -3152,12 +3365,12 @@ proc main =
     # deadline measured from before the drawing is a deadline the blink is
     # always a frame's width short of, and a caret that blinks every other
     # frame or every frame depending on how long the frame took.
-    nextFrame =
-      if windowFocused or job.active: getTicks() + IdleFrameMs
+    app.nextFrame =
+      if app.windowFocused or app.job.active: getTicks() + IdleFrameMs
       else: high(int)
     refresh()
 
-  for _, f in fonts:
+  for _, f in app.fonts:
     closeFont(f)
   shutdown()
 

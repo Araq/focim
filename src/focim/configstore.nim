@@ -52,7 +52,8 @@ const defaultLayout* = """
   (cols
     (rows (px 200)
       (tabs (lines 6))
-      (explorer))
+      (explorer)
+      (branches (lines 5)))
     (editor (stretch 4))
     (rows (stretch 2)
       (clipboard (lines 9))
