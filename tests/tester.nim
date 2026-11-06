@@ -65,6 +65,8 @@ exec "nim c -r tests/viewtest.nim"
 exec "nim c -r tests/panelstest.nim"
 # The branches panel's git calls, against a repository made for the purpose.
 exec "nim c -r tests/gitbranchestest.nim"
+# And `search`: every match under a directory, as lines a click goes to.
+exec "nim c -r tests/dirsearchtest.nim"
 
 # The editor itself, once, with the platform's default backend -- the one
 # thing here that pulls in a driver, and so the one thing that would notice a
