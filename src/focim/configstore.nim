@@ -229,3 +229,47 @@ proc withHeader*(old, fresh: string): string =
       head.add line & "\n"
     else: break
   result = head & blanks & fresh
+
+# ---------------------------------------------------------------------------
+# Untitled files -- what Ctrl+N opens. A new tab is a real file from the
+# start, under the config dir rather than wherever the window happens to be,
+# so that nothing typed into one is ever only in memory: it saves itself as
+# it is typed, the session reopens it, and `s <name>` moves it out of here.
+# ---------------------------------------------------------------------------
+
+const UntitledDirName* = "untitled"
+
+proc untitledDir*(): string = configPath(UntitledDirName)
+
+proc isUntitled*(path: string): bool =
+  ## One of the files `freshUntitled` hands out.
+  path.len > 0 and cmpPaths(path.parentDir, untitledDir()) == 0 and
+    path.extractFilename.startsWith("untitled-")
+
+proc freshUntitled*(taken: openArray[string]): string =
+  ## `untitled-N.txt` for the lowest N that is free: no tab has it, and the
+  ## file is not there -- or is, but empty, which is a leftover with nothing
+  ## in it to keep. The file is made, so that the tab that opens it is a tab
+  ## onto a file like any other. "" when the config dir cannot be written.
+  try:
+    createDir(untitledDir())
+  except CatchableError:
+    return ""
+  var n = 1
+  while true:
+    result = untitledDir() / "untitled-" & $n & ".txt"
+    var open = false
+    for t in taken:
+      if cmpPaths(t, result) == 0: open = true
+    if not open:
+      if not fileExists(result):
+        try:
+          writeFile(result, "")
+        except CatchableError:
+          return ""
+        return
+      try:
+        if getFileSize(result) == 0: return
+      except CatchableError:
+        discard
+    inc n

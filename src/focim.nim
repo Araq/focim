@@ -205,6 +205,7 @@ import focim/track
 import focim/configstore
 import focim/gitbranches
 import focim/dirsearch
+import focim/gitdiff
 import focim/completion
 import focim/panels
 import focim/images
@@ -418,6 +419,7 @@ type
     kind: BufferKind    ## a file, or one of the settings lanes
     idx: BufferIndexer  ## how far the word index has walked this buffer
     search: BufferSearch ## the hits of the last search in this buffer
+    diff: DiffView      ## its diff mode, see `toggleDiff`
     watch: bool         ## does this buffer stand for what is in a file? A
                         ## generated one does not, and neither does one that
                         ## holds the reason its file could not be read -- both
@@ -638,6 +640,12 @@ proc decorateTabs(tabs: var TabList; buffers: seq[BufferEntry]; current: int) =
     if i < buffers.len and buffers[i].ed.changed:
       tabs.ed.addMarker(pos, pos + n.len - 1, theme.markerBg)
     pos += n.len + 1
+  # A tab in diff mode has a bar at its edge, in the color of a changed line:
+  # which tabs are showing a diff is visible without opening them.
+  tabs.ed.clearLineDecorations()
+  for i in 0 ..< min(buffers.len, tabs.names.len):
+    if buffers[i].diff.on:
+      tabs.ed.addLineDecoration(i, theme.fg[TokenClass.Yellow], decoBar)
 
 proc applyTabEdits(tabs: var TabList; buffers: var seq[BufferEntry];
                    current: var int; font: Font) =
@@ -1603,7 +1611,11 @@ proc saveCurrent(buffers: var seq[BufferEntry]; current: int;
 
 proc saveBufferAs(buffers: var seq[BufferEntry]; current: int; path: string;
                   note: var string) =
-  ## Write the buffer to `path` and let it belong there from now on.
+  ## Write the buffer to `path` and let it belong there from now on. For an
+  ## untitled tab that is a rename: the file it was is removed once the new
+  ## one is written -- written, not moved, so it works from the config dir to
+  ## any other disk.
+  let old = buffers[current].path
   try:
     buffers[current].ed.saveToFile(path)
   except CatchableError:
@@ -1626,6 +1638,11 @@ proc saveBufferAs(buffers: var seq[BufferEntry]; current: int; path: string;
   buffers[current].watch = true
   buffers[current].timestamp = fileStamp(full)
   note = ""
+  if old.isUntitled and cmpPaths(old, full) != 0:
+    try:
+      removeFile(old)
+    except CatchableError:
+      note = "saved; " & old & " could not be removed"
 
 type
   SaveOutcome = enum
@@ -2139,6 +2156,7 @@ type
     asked: Ask                   ## what the prompt is waiting to hear about
     tracker: Tracker             ## the outstanding "where is this name?"
     grep: DirSearch              ## the `search` being written into
+    diffTheme: Theme             ## the theme the diffs were painted in
     grepCell: string             ## the terminal panel it is written into
     jumps: seq[TrackHit]         ## and the places its answer named
 
@@ -2489,6 +2507,176 @@ proc spreadTheme(app: var App) =
     b.ed.theme = app.theme
     b.ed.blinks = blinks
 
+# ---------------------------------------------------------------------------
+# Diff mode -- a tab compared with a revision, the differences painted on the
+# file itself. The tab stays the file: the diff is decoration, never text, so
+# saving, searching and the word index never meet it.
+# ---------------------------------------------------------------------------
+
+proc blend(c, bg: Color; percent: int): Color =
+  ## `c` laid over `bg` at `percent` -- a tint, light enough to read code on.
+  template mix(x, y: uint8): uint8 =
+    uint8((x.int * percent + y.int * (100 - percent)) div 100)
+  color(mix(c.r, bg.r), mix(c.g, bg.g), mix(c.b, bg.b))
+
+proc decorateDiff(b: var BufferEntry; theme: Theme) =
+  ## The hunks as the gutter and the rows show them, in the colors a `git
+  ## diff` has in the terminal: green for added, yellow for changed, red for
+  ## where lines were deleted.
+  b.ed.clearLineDecorations()
+  b.ed.clearLineTints()
+  b.ed.clearPhantomRows()
+  if not b.diff.on: return
+  let red = theme.fg[TokenClass.Red]
+  let gone = blend(red, theme.bg, 14)
+  # What is gone is read, not worked on: a step dimmer than the text.
+  let goneText = blend(theme.fg[TokenClass.None], theme.bg, 70)
+  for h in b.diff.hunks:
+    if h.kind in {hunkAdded, hunkChanged}:
+      let c = if h.kind == hunkAdded: theme.fg[TokenClass.Green]
+              else: theme.fg[TokenClass.Yellow]
+      let tint = blend(c, theme.bg, 14)
+      for l in h.line ..< h.line + h.lines:
+        b.ed.addLineDecoration(l, c, decoBar)
+        b.ed.setLineTint(l, tint)
+    if h.kind in {hunkDeleted, hunkChanged}:
+      # The lines of the base that are gone, between the lines they stood
+      # between -- for a change, above the lines that replaced them, so the
+      # old and the new read top to bottom. Phantom rows: drawn, never text.
+      b.ed.setPhantomRows(h.line, b.diff.base[h.baseLine ..< h.baseLine + h.baseLines],
+                          goneText, gone, red,
+                          if h.kind == hunkDeleted: "more deleted lines"
+                          else: "more replaced lines")
+
+proc diffLabel(d: DiffView): string =
+  ## What the status bar says while a tab is in diff mode -- a tinted gutter
+  ## is a mystery to somebody who forgot they asked for it.
+  if not d.on: return ""
+  result = "diff vs " & d.rev & ": " &
+    (if d.hunks.len == 0: "no changes"
+     elif d.hunks.len == 1: "1 hunk"
+     else: $d.hunks.len & " hunks")
+
+proc diffOff(b: var BufferEntry) =
+  b.diff = DiffView()
+  b.ed.clearLineDecorations()
+  b.ed.clearLineTints()
+
+proc startDiff(app: var App; idx: int; rev: string; sha = ""): bool =
+  ## Put tab `idx` in diff mode against `rev`, or move it to `rev` when it is
+  ## in diff mode already. `sha` is `rev` resolved, for a caller that starts
+  ## many at once. A revision that does not work leaves the tab as it was.
+  template b: untyped = app.buffers[idx]
+  if b.path.len == 0 or b.isLane:
+    app.tabs.note = "a diff needs a file"
+    return false
+  let root = repoRoot(b.path)
+  if root.len == 0:
+    app.tabs.note = "not in a git repository"
+    return false
+  let rev = if rev.len == 0: "HEAD" else: rev
+  let base = if sha.len > 0: loadBaseAt(root, b.path, sha)
+             else: loadBase(root, b.path, rev)
+  if not base.ok:
+    app.tabs.note = base.error
+    return false
+  b.diff = DiffView(on: true, rev: rev, root: root, sha: base.sha,
+                    head: headSha(root), base: base.lines, version: -1)
+  result = true
+
+proc updateDiffs(app: var App) =
+  ## The hunks follow the text: recomputed after every edit, in the turn
+  ## after it, so the gutter is never more than one frame behind the typing.
+  ## A line diff of a few thousand lines is a millisecond; the base is not
+  ## asked for again -- it only changes when HEAD does, see `checkDiffBases`.
+  let themeChanged = app.theme != app.diffTheme
+  app.diffTheme = app.theme
+  for b in app.buffers.mitems:
+    if not b.diff.on: continue
+    if b.diff.version != b.ed.textVersion:
+      b.diff.hunks = computeHunks(b.diff.base, textLines(b.ed.fullText))
+      b.diff.version = b.ed.textVersion
+      b.decorateDiff(app.theme)
+      app.mustDraw = true
+    elif themeChanged:
+      b.decorateDiff(app.theme)
+
+proc toggleDiff(app: var App; rev: string) =
+  ## `diff` in the prompt: on against HEAD, off again; `diff <rev>` on, or
+  ## moved to `rev` while it is on.
+  template b: untyped = app.buffers[app.current]
+  if rev.len == 0 and b.diff.on:
+    b.diffOff()
+    app.tabs.note = "diff off"
+    return
+  if app.startDiff(app.current, rev):
+    app.updateDiffs()
+    app.tabs.note = ""
+
+proc checkDiffBases(app: var App) =
+  ## On the disk check: has HEAD moved under a tab in diff mode? Then what its
+  ## revision names may have moved too -- a commit moves `HEAD`, a checkout
+  ## moves everything. One `rev-parse` per repository, not per tab. A base
+  ## that no longer resolves takes the tab out of diff mode: `branch` after
+  ## switching to the default branch, which has no fork to compare with.
+  var heads = initTable[string, string]()
+  var dropped = 0
+  for i in 0 ..< app.buffers.len:
+    template b: untyped = app.buffers[i]
+    if not b.diff.on: continue
+    if b.diff.root notin heads: heads[b.diff.root] = headSha(b.diff.root)
+    let head = heads[b.diff.root]
+    if head == b.diff.head: continue
+    let rev = b.diff.rev
+    let saved = app.tabs.note
+    if app.startDiff(i, rev):
+      app.tabs.note = saved
+    else:
+      b.diffOff()
+      app.tabs.note = saved
+      inc dropped
+    app.mustDraw = true
+  if dropped > 0:
+    app.tabs.note.add (if app.tabs.note.len > 0: "; " else: "") &
+      "diff off for " & $dropped & (if dropped == 1: " tab" else: " tabs")
+
+proc showHunk(app: var App; line: int) =
+  ## A click on the summary row of a block too big to show: the whole hunk in
+  ## the terminal, as `git diff` would print it -- where the console
+  ## highlighter colors it, and where it can be read from top to bottom.
+  template b: untyped = app.buffers[app.current]
+  let i = hunkAt(b.diff.hunks, line)
+  if i < 0: return
+  let h = b.diff.hunks[i]
+  let text = b.ed.fullText.textLines
+  let rel = relativePath(b.path, app.term.base)
+  var listing = rel & ":" & $(h.line + 1) & ": hunk " & $(i + 1) & "/" &
+            $b.diff.hunks.len & " against " & b.diff.rev & "\L"
+  listing.add "@@ -" & $(h.baseLine + 1) & "," & $h.baseLines & " +" &
+          $(h.line + 1) & "," & $h.lines & " @@\L"
+  for k in h.baseLine ..< h.baseLine + h.baseLines: listing.add "-" & b.diff.base[k] & "\L"
+  for k in h.line ..< min(h.line + h.lines, text.len): listing.add "+" & text[k] & "\L"
+  if not app.term.printOutput(listing):
+    app.tabs.note = "the terminal is busy; the hunk is " & $h.baseLines &
+                    " lines from line " & $(h.line + 1)
+
+proc jumpHunk(app: var App; up: bool) =
+  ## `hunk next` / `hunk prev`, Alt+Down / Alt+Up: to the next hunk, round
+  ## the file the way `next` goes round the matches of a search.
+  app.updateDiffs()
+  template b: untyped = app.buffers[app.current]
+  if not b.diff.on:
+    app.tabs.note = "this tab shows no diff -- try 'diff'"
+    return
+  let i = nextHunk(b.diff.hunks, b.ed.currentLine, up)
+  if i < 0:
+    app.tabs.note = "no changes against " & b.diff.rev
+    return
+  let h = b.diff.hunks[i]
+  b.ed.gotoLine(min(h.line, b.ed.getLineCount() - 1) + 1, 0)
+  app.tabs.note = "hunk " & $(i + 1) & "/" & $b.diff.hunks.len
+  app.focus = gEditorCell
+
 proc checkDisk(app: var App) =
   ## What the disk has been doing behind the window's back. Asked at its own
   ## rate rather than at whatever rate the window happens to be repainting --
@@ -2501,6 +2689,7 @@ proc checkDisk(app: var App) =
                    app.tabs.note):
     app.mustDraw = true
   if app.explorer.refreshListing(): app.mustDraw = true
+  app.checkDiffBases()
   # Only while it is shown: a listing nobody can see is two git processes
   # every couple of seconds for nothing. It catches up when it reappears.
   if app.layout.cell("branches") and
@@ -2613,6 +2802,18 @@ proc pollTracker(app: var App) =
                     app.buffers[app.current].ed)
     app.focus = gEditorCell
 
+proc saveUntitled(app: var App) =
+  ## An untitled tab is written back as it changes, like the two lanes: it is
+  ## the editor's own file, and what is in it was never anywhere else.
+  for b in app.buffers.mitems:
+    if b.ed.changed and b.path.isUntitled:
+      try:
+        b.ed.saveToFile(b.path)
+        b.timestamp = fileStamp(b.path)
+        b.ed.markSaved()
+      except CatchableError:
+        app.tabs.note = "cannot save " & b.path & ": " & getCurrentExceptionMsg()
+
 proc lookAround(app: var App) =
   app.reparseLanes()
   app.spreadTheme()
@@ -2649,6 +2850,7 @@ proc lookAround(app: var App) =
     if b.search.stale(b.ed):
       b.search.clear()
       b.ed.clearMarkers()
+  app.updateDiffs()
   app.stepWordIndex()
   app.stepSearch()
   app.pollTracker()
@@ -2821,6 +3023,21 @@ proc explorerEnter(app: var App) =
     app.explorer.activateEntry(idx, app.buffers, app.current, app.editorFont,
                                app.focus, app.term.cwd, app.tabs.note)
 
+proc newTab(app: var App) =
+  ## Ctrl+N: a new tab onto a new file, `untitled-N.txt` in the config dir.
+  ## A file and not a buffer with no file behind it: it saves itself as it is
+  ## typed (see `saveUntitled`), the session reopens it, and closing it loses
+  ## nothing -- `s <name>` is what moves it to where it belongs.
+  var taken: seq[string] = @[]
+  for b in app.buffers: taken.add b.path
+  let path = freshUntitled(taken)
+  if path.len == 0:
+    app.tabs.note = "cannot write " & untitledDir()
+    return
+  app.current = app.buffers.openFile(app.editorFont, path, -1, -1)
+  app.showInActivePanel()
+  app.focus = gEditorCell
+
 proc prepareCommand(app: var App; cells: Table[string, Rect]; cmd: string) =
   ## Ctrl+P and Ctrl+F: the prompt, with the command already typed.
   if "status" in cells:
@@ -2857,6 +3074,8 @@ proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
     gotoNextMatch(app.buffers, app.current, app.finder,
                   ShiftPressed in e.mods, app.theme, app.tabs.note)
     app.focus = gEditorCell
+  elif cmd and e.key == KeyN:
+    app.newTab()
   elif cmd and e.key == KeyW:
     # Close the current tab by deleting its line, so that it goes through
     # the tab list's undo stack like a hand-made deletion would.
@@ -2888,6 +3107,11 @@ proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
       jumpTo(app.jumps[pick], app.buffers, app.current, app.editorFont,
              app.focus, app.tabs.note)
       app.jumps.setLen 0
+  elif AltPressed in e.mods and e.key in {KeyUp, KeyDown} and
+       app.focus.isEditor and app.buffers[app.current].diff.on:
+    # Only in diff mode: anywhere else the keys stay what SynEdit makes of
+    # them.
+    app.jumpHunk(e.key == KeyUp)
   elif e.key == KeyEnter and app.focus == "tabs":
     # Enter activates a tab instead of inserting a newline.
     let idx = app.tabs.ed.currentLine
@@ -3076,6 +3300,17 @@ proc openTouched(app: var App) =
     keep.add t.path
     if t.path == front: continue
     discard app.buffers.openFile(font, t.path, t.line, 0)
+  # And they come up showing what the branch did to them: a switch is a
+  # review of the branch. The fork point is the same for all of them, so it
+  # is asked for once.
+  let said0 = app.tabs.note
+  let (fork, _) = resolveRev(app.branches.branches.root, "branch")
+  if fork.len > 0:
+    for i in 0 ..< app.buffers.len:
+      if app.buffers[i].path in keep and
+         (not app.buffers[i].diff.on or app.buffers[i].diff.rev == "branch"):
+        discard app.startDiff(i, "branch", fork)
+  app.tabs.note = said0
   renderTabs(app.tabs, app.buffers)
   var closing = 0
   for i in countdown(app.buffers.high, 0):
@@ -3182,6 +3417,8 @@ proc runEditAction(app: var App; act: EditAction) =
       else: ed.underline(-1, -1)
   of closeLine:
     discard # the editor has no close buttons
+  of phantomClick:
+    app.showHunk(act.line)
   of noAction:
     ed.underline(-1, -1)
 
@@ -3247,7 +3484,7 @@ proc runTermAction(app: var App; act: TermAction) =
     runIndexCommand(act, app.words, app.job, app.tabs.note)
   of searchFiles:
     app.startSearch(act)
-  of resetConfig, selectTheme, splitPanel, closePanel:
+  of resetConfig, selectTheme, splitPanel, closePanel, diffMode, hunkJump:
     # Unreachable: `defaults`, `theme` and the panel commands are the
     # prompt's, and this is the terminal -- there the words are programs'
     # names.
@@ -3281,9 +3518,14 @@ proc drawTerminals(app: var App; e: Event; cells: Table[string, Rect]) =
 proc redrawStatus(app: var App) =
   ## The command has just changed what the line says about the buffer, and
   ## the prompt it left behind belongs to a terminal, not to a status bar.
+  ## A tab in diff mode says so first: it is what the tinted gutter means.
+  let note = laneNote(app.laneNotes, app.tabs.note)
+  let label = diffLabel(app.buffers[app.current].diff)
   updateStatus(app.status, app.buffers[app.current].ed,
                app.buffers[app.current].path,
-               laneNote(app.laneNotes, app.tabs.note))
+               if label.len == 0: note
+               elif note.len == 0: label
+               else: label & "  " & note)
 
 proc runStatusAction(app: var App; act: TermAction) =
   ## What a command typed into the prompt asks for. A question keeps the
@@ -3326,6 +3568,11 @@ proc runStatusAction(app: var App; act: TermAction) =
     # typed: a command about the editor means the editor you were in.
     app.splitPanelAt(gEditorCell, act.sideways)
     return
+  of diffMode:
+    app.toggleDiff(act.rev)
+    app.focus = gEditorCell
+  of hunkJump:
+    app.jumpHunk(act.up)
   of closePanel:
     app.closePanelAt(gEditorCell)
     return
@@ -3431,7 +3678,9 @@ proc renderFrame(app: var App; e: var Event) =
   app.drawStatus(e, cells)
   app.drawOverlays(cells)
 
-  # Persist the session once everything that could have changed it has run.
+  # Persist the session once everything that could have changed it has run --
+  # and the untitled tabs with it, in the frame the typing happened in.
+  app.saveUntitled()
   let tt = tabsText(app.buffers)
   if tt != app.savedTabs:
     app.savedTabs = tt

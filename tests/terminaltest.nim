@@ -211,6 +211,16 @@ block: # the prompt's own commands, which a terminal leaves to the programs
         a.kind == selectTheme and a.name == "mocha", $a.kind)
   a = p.ran("defaults")
   check("`defaults` is the prompt's as well", a.kind == resetConfig, $a.kind)
+  a = p.ran("diff")
+  check("a bare `diff` is the prompt's diff mode",
+        a.kind == diffMode and a.rev.len == 0, $a.kind)
+  a = p.ran("diff HEAD~2")
+  check("and names what to compare with", a.kind == diffMode and
+        a.rev == "HEAD~2", a.rev)
+  a = p.ran("hunk next")
+  check("`hunk next` walks down", a.kind == hunkJump and not a.up, $a.kind)
+  a = p.ran("hunk p")
+  check("`hunk p` walks up", a.kind == hunkJump and a.up, $a.kind)
 
   var t = newTerm()
   a = t.ran("theme mocha")
@@ -251,6 +261,16 @@ block: # `search`, whose output the host writes in a slice at a time
   check("its end puts the prompt back, with the typing still on it",
         not t.searching and t.commandLine == "ls" and
         t.allText.contains("1 lines in 1 files"), t.allText)
+
+  var o = newTerm()
+  o.typeText("make")
+  check("the host can print into it", o.printOutput("@@ -1,1 +1,0 @@\L-gone\L"))
+  check("under the prompt, with the typing kept for the next one",
+        o.allText.contains("\L@@ -1,1 +1,0 @@\L-gone\L") and
+        o.commandLine == "make", o.allText)
+  o.beginSearch()
+  check("but not into a search's output", not o.printOutput("x"))
+  o.endSearch("done")
 
   var p = createTerminal(font)
   p.isPrompt = true

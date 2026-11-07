@@ -389,6 +389,8 @@ type
     selectTheme,        ## user typed `theme [<name>]`
     splitPanel,         ## user typed `split right` / `split down`
     closePanel,         ## user typed `unsplit`
+    diffMode,           ## user typed `diff [<rev>]` in the prompt
+    hunkJump,           ## user typed `hunk next` / `hunk prev` in the prompt
     ctrlHover,          ## ctrl+mouse move over text
     ctrlClick           ## ctrl+click on text
 
@@ -427,6 +429,10 @@ type
     of splitPanel:
       sideways*: bool   ## `right` rather than `down`
     of closePanel: discard
+    of diffMode:
+      rev*: string      ## what to compare with; "" for the bare `diff`
+    of hunkJump:
+      up*: bool         ## `hunk prev` rather than `hunk next`
     of ctrlHover, ctrlClick:
       pos*: int         ## buffer offset
 
@@ -811,6 +817,23 @@ proc endSearch*(t: var Terminal; summary: string) =
     t.ed.scrollToOutput(t.outputStart)
     t.outputStart = -1
 
+proc printOutput*(t: var Terminal; text: string): bool =
+  ## Text the host has to show, written as if a command had printed it: on
+  ## lines of its own under the prompt, with a fresh prompt after it, the view
+  ## left at the top of it, and whatever was half typed still on the command
+  ## line. False while a program or a `search` owns the output -- their lines
+  ## and these would end up in the middle of each other.
+  if t.processRunning or t.searching: return false
+  let typed = t.getCommand()
+  if typed.len > 0: t.emptyCmd()
+  t.endOutput()
+  let start = t.ed.len
+  t.ed.appendOutput("\L" & text & (if text.endsWith('\L'): "" else: "\L"))
+  t.insertPrompt()
+  if typed.len > 0: t.ed.insertText(typed)
+  t.ed.scrollToOutput(start)
+  result = true
+
 proc parseSearch(t: Terminal; cmd: string; i: int): TermAction =
   ## `search <text> [options] [--exclude <pattern>]...`, where an exclude is
   ## also `--exclude=<pattern>`, and either may list several, comma separated.
@@ -885,6 +908,21 @@ proc runCommand*(t: var Terminal; cmd: var string): TermAction =
     i = parseWord(cmd, b, i, convToLower = true)
     t.insertPrompt()
     return TermAction(kind: selectTheme, name: b)
+  # And `diff`: in a terminal it is the program, in the prompt it is the tab's
+  # diff mode. `hunk` goes with it -- walking a diff is the prompt's business
+  # because the diff is.
+  if t.isPrompt and a == "diff":
+    var b = ""
+    i = parseWord(cmd, b, i)
+    t.insertPrompt()
+    return TermAction(kind: diffMode, rev: b)
+  if t.isPrompt and a == "hunk":
+    var b = ""
+    i = parseWord(cmd, b, i, convToLower = true)
+    t.insertPrompt()
+    if b in ["next", "prev", "n", "p"]:
+      return TermAction(kind: hunkJump, up: b in ["prev", "p"])
+    return TermAction(kind: noAction)
   # And so are the panels: what the two buttons in a panel's corner do, for a
   # keyboard that would rather not go and find the corner.
   if t.isPrompt and (a == "split" or a == "unsplit"):
@@ -1223,4 +1261,4 @@ proc draw*(t: var Terminal; e: Event; area: Rect; focused: bool): TermAction =
     result = TermAction(kind: ctrlHover, pos: edAct.pos)
   of ctrlClick:
     result = TermAction(kind: ctrlClick, pos: edAct.pos)
-  of noAction, closeLine: discard
+  of noAction, closeLine, phantomClick: discard

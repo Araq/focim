@@ -67,6 +67,10 @@ exec "nim c -r tests/panelstest.nim"
 exec "nim c -r tests/gitbranchestest.nim"
 # And `search`: every match under a directory, as lines a click goes to.
 exec "nim c -r tests/dirsearchtest.nim"
+# Diff mode: the base from git, the hunks from the line diff, and what a
+# SynEdit paints for them.
+exec "nim c -r tests/gitdifftest.nim"
+exec "nim c -r tests/diffviewtest.nim"
 
 # The editor itself, once, with the platform's default backend -- the one
 # thing here that pulls in a driver, and so the one thing that would notice a
