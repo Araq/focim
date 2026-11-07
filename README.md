@@ -109,6 +109,13 @@ of a checkout of the library it is a vocabulary of.
 | [Diff mode](doc/diff.md) | `diff` shows where a tab differs from `HEAD`, or from where its branch forked |
 | [The clipboard panel](doc/clipboard.md) | The last thirty texts that entered the clipboard, `Ctrl+1` .. `Ctrl+9` to paste one |
 
+Left of the prompt is a strip of keys, one per shortcut of the window --
+`P`, `F`, `N`, `W`, `S`, the space bar, `+` and `-`, and in diff mode the
+arrows for `Alt+Up`/`Alt+Down`. A key does what its shortcut does when it is
+clicked, and says what that is, with the command behind it, when the pointer
+rests on it. They come out of the same table the keyboard is answered from,
+`src/focim/shortcuts.nim`.
+
 The long version is the comment at the top of
 [`src/focim.nim`](src/focim.nim), which is where the design notes live.
 
