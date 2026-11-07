@@ -30,6 +30,10 @@ the same:
   dimmed -- and for a change, the old lines above the ones that replaced
   them, so old and new read top to bottom
 
+The same colors mark the scroll bar, at the height each hunk has in the whole
+file, so the hunks of a long file can be seen at a glance and gone to by
+dragging the grip there.
+
 The status bar says what the tab is compared with -- `diff vs HEAD: 3 hunks`
 -- and the tab list marks every tab in diff mode with a bar of its own.
 

@@ -3467,21 +3467,70 @@ proc closeButtonHit(s: SynEdit; area: Rect; x, y: int): int =
   if s.getLineText(line).len == 0: return   # an empty line has no button
   result = line
 
-proc scrollGrip(s: SynEdit; area: Rect; lineH: int): Rect =
-  ## Compute the scrollbar grip rectangle.
-  if not s.scrollEnabled: return
+proc scrollGeometry(s: SynEdit; area: Rect; lineH: int):
+    tuple[gripH: int; scrollArea, maxScroll: float] =
+  ## How the scroll bar maps lines to pixels: the grip is `gripH` tall -- the
+  ## part of the buffer on screen, but never less than 20 pixels, or it could
+  ## not be grabbed -- and its top travels `scrollArea` pixels while the first
+  ## line on screen goes from 0 to `maxScroll`. The grip and the marks in the
+  ## track both go by this, so a mark of a line on screen is under the grip.
   let totalLines = s.numberOfLines.int + s.span
   let contentH = float(totalLines * lineH)
   let trackH = float(area.h - 2)
   let ratio = float(area.h) / contentH
-  let gripH = clamp(int(trackH * ratio), 20, int(trackH))
-  let scrollArea = trackH - float(gripH)
-  let maxScroll = float(totalLines - s.span)
+  result.gripH = clamp(int(trackH * ratio), 20, int(trackH))
+  result.scrollArea = trackH - float(result.gripH)
+  result.maxScroll = float(totalLines - s.span)
+
+proc scrollGrip(s: SynEdit; area: Rect; lineH: int): Rect =
+  ## Compute the scrollbar grip rectangle.
+  if not s.scrollEnabled: return
+  let (gripH, scrollArea, maxScroll) = s.scrollGeometry(area, lineH)
   let posRatio = if maxScroll > 0: float(s.firstLine) / maxScroll else: 0.0
   let gripY = clamp(int(scrollArea * posRatio) + area.y + 1,
                      area.y + 1, area.y + area.h - gripH - 1)
   result = rect(area.x + area.w - ScrollBarWidth, gripY,
                 ScrollBarWidth - 2, gripH)
+
+proc drawScrollMarks(s: SynEdit; area, track: Rect; lineH: int) =
+  ## The line decorations and the phantom blocks again, in the scroll bar:
+  ## where in the whole buffer there is something marked, so that the hunks
+  ## of a diff can be seen -- and gone to -- without scrolling past them all.
+  ## A line goes where the grip's top would be with that line first on
+  ## screen, so what is on screen is marked under the grip; at least two
+  ## pixels tall, and consecutive lines of one color are one mark, so a file
+  ## that is all added is one rectangle and not thousands.
+  ##
+  ## In the left half of the track and over the grip: the grip would
+  ## otherwise hide the very marks next to what is on screen.
+  if s.lineDecorations.len == 0 and s.phantoms.len == 0: return
+  let (_, scrollArea, maxScroll) = s.scrollGeometry(area, lineH)
+  if maxScroll <= 0: return
+  let lines = s.numberOfLines.int + 1
+  template yOf(line: int): int =
+    area.y + 1 + int(scrollArea * float(min(line, maxScroll.int)) / maxScroll)
+  let x = track.x + 1
+  let w = max(2, track.w div 2 - 1)
+  var top = -1
+  var bottom = -1
+  var color = Color()
+  # A line joins the mark being built only if it lands inside it or just
+  # below it, so lines in any order are drawn right: in line order -- which is
+  # how a diff adds them -- they make the fewest rectangles, and any other
+  # order only makes more of them.
+  template mark(line: int; c: Color) =
+    let a = yOf(line)
+    let b = max(a + 2, yOf(line + 1))
+    if top >= 0 and c == color and a >= top and a <= bottom:
+      bottom = max(bottom, b)
+    else:
+      if top >= 0: fillRect(rect(x, top, w, bottom - top), color)
+      top = a
+      bottom = b
+      color = c
+  for d in s.lineDecorations: mark(d.line, d.color)
+  for line, p in s.phantoms: mark(min(line, lines - 1), p.bar)
+  if top >= 0: fillRect(rect(x, top, w, bottom - top), color)
 
 proc fitRow(s: SynEdit; text: string; width: int): string =
   ## `text` as one row of `width` pixels: tabs as the buffer shows them, and
@@ -3728,6 +3777,7 @@ proc renderPass(s: var SynEdit; area: Rect; showCursor: bool) =
     let gripColor = if s.scrollGrabbed: s.theme.scrollBarActiveColor
                     else: s.theme.scrollBarColor
     fillRect(finalGrip, gripColor)
+    s.drawScrollMarks(area, trackRect, lineH)
 
 proc render*(s: var SynEdit; area: Rect; showCursor: bool) =
   ## Core rendering. Paints the buffer, optionally with a blinking cursor.
