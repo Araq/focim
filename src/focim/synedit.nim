@@ -46,7 +46,6 @@ import ./theme
 import ./langs/markdown
 import std/strutils
 import std/tables
-import std/algorithm
 export theme
 export markdown
 
@@ -3510,25 +3509,27 @@ proc drawScrollMarks(s: SynEdit; area, track: Rect; lineH: int) =
   let lines = s.numberOfLines.int + 1
   template yOf(line: int): int =
     area.y + 1 + int(scrollArea * float(min(line, maxScroll.int)) / maxScroll)
-  var marks: seq[(int, Color)] = @[]
-  for d in s.lineDecorations: marks.add (d.line, d.color)
-  for line, p in s.phantoms: marks.add (min(line, lines - 1), p.bar)
-  marks.sort(proc (a, b: (int, Color)): int = cmp(a[0], b[0]))
   let x = track.x + 1
   let w = max(2, track.w div 2 - 1)
   var top = -1
   var bottom = -1
   var color = Color()
-  for (line, c) in marks:
+  # A line joins the mark being built only if it lands inside it or just
+  # below it, so lines in any order are drawn right: in line order -- which is
+  # how a diff adds them -- they make the fewest rectangles, and any other
+  # order only makes more of them.
+  template mark(line: int; c: Color) =
     let a = yOf(line)
     let b = max(a + 2, yOf(line + 1))
-    if top >= 0 and c == color and a <= bottom:
+    if top >= 0 and c == color and a >= top and a <= bottom:
       bottom = max(bottom, b)
     else:
       if top >= 0: fillRect(rect(x, top, w, bottom - top), color)
       top = a
       bottom = b
       color = c
+  for d in s.lineDecorations: mark(d.line, d.color)
+  for line, p in s.phantoms: mark(min(line, lines - 1), p.bar)
   if top >= 0: fillRect(rect(x, top, w, bottom - top), color)
 
 proc fitRow(s: SynEdit; text: string; width: int): string =
