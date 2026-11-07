@@ -389,6 +389,8 @@ type
     selectTheme,        ## user typed `theme [<name>]`
     splitPanel,         ## user typed `split right` / `split down`
     closePanel,         ## user typed `unsplit`
+    diffMode,           ## user typed `diff [<rev>]` in the prompt
+    hunkJump,           ## user typed `hunk next` / `hunk prev` in the prompt
     ctrlHover,          ## ctrl+mouse move over text
     ctrlClick           ## ctrl+click on text
 
@@ -427,6 +429,10 @@ type
     of splitPanel:
       sideways*: bool   ## `right` rather than `down`
     of closePanel: discard
+    of diffMode:
+      rev*: string      ## what to compare with; "" for the bare `diff`
+    of hunkJump:
+      up*: bool         ## `hunk prev` rather than `hunk next`
     of ctrlHover, ctrlClick:
       pos*: int         ## buffer offset
 
@@ -885,6 +891,21 @@ proc runCommand*(t: var Terminal; cmd: var string): TermAction =
     i = parseWord(cmd, b, i, convToLower = true)
     t.insertPrompt()
     return TermAction(kind: selectTheme, name: b)
+  # And `diff`: in a terminal it is the program, in the prompt it is the tab's
+  # diff mode. `hunk` goes with it -- walking a diff is the prompt's business
+  # because the diff is.
+  if t.isPrompt and a == "diff":
+    var b = ""
+    i = parseWord(cmd, b, i)
+    t.insertPrompt()
+    return TermAction(kind: diffMode, rev: b)
+  if t.isPrompt and a == "hunk":
+    var b = ""
+    i = parseWord(cmd, b, i, convToLower = true)
+    t.insertPrompt()
+    if b in ["next", "prev", "n", "p"]:
+      return TermAction(kind: hunkJump, up: b in ["prev", "p"])
+    return TermAction(kind: noAction)
   # And so are the panels: what the two buttons in a panel's corner do, for a
   # keyboard that would rather not go and find the corner.
   if t.isPrompt and (a == "split" or a == "unsplit"):

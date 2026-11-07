@@ -144,9 +144,16 @@ type
     a, b: int             ## buffer range [a..b] to highlight
     color: Color          ## background color for this marker
 
+  DecorationKind* = enum
+    decoBar               ## a bar down the left edge of the row
+    decoTickAbove         ## a tick along the top of the row: something stood
+                          ## above this line that is not there any more
+    decoTickBelow         ## the same along the bottom, for the last line
+
   LineDecoration = object
     line: int             ## line number (0-based)
     color: Color          ## color indicator shown in the line number gutter
+    kind: DecorationKind
 
   RowHighlight = object
     line: int             ## line number (0-based), -1 for none
@@ -295,6 +302,9 @@ type
     # Row highlight -- see setRowHighlight(). One row: a list has one line
     # that is the current thing, the way it has one cursor.
     rowHighlight: RowHighlight
+    # Line tints -- see setLineTint(). Any number of rows, each a color: what
+    # a diff paints behind the lines it changed.
+    lineTints: Table[int, Color]
     # The buffer range of the row `render` is painting a band behind, and the
     # color of that band, so that the per-token backgrounds agree with it.
     # Set per row while rendering; `(0, -1)` is "no row".
@@ -2966,6 +2976,22 @@ proc clearLineDecoration*(s: var SynEdit; line: int) =
       s.lineDecorations.del(i)
       return
 
+proc addLineDecoration*(s: var SynEdit; line: int; color: Color;
+                        kind: DecorationKind) =
+  ## A decoration of `kind` for `line`, beside whatever else the line has: a
+  ## line can be changed and have had lines deleted above it at once.
+  s.lineDecorations.add LineDecoration(line: line, color: color, kind: kind)
+
+proc setLineTint*(s: var SynEdit; line: int; color: Color) =
+  ## Paint the whole row of `line` in `color`, the way `setRowHighlight` does
+  ## but for as many rows as there are tints -- a diff has one per changed
+  ## line. The caret's band still wins on the line the caret is on: it is the
+  ## one band that says where the next keystroke goes.
+  s.lineTints[line] = color
+
+proc clearLineTints*(s: var SynEdit) =
+  s.lineTints.clear()
+
 proc clearLineDecorations*(s: var SynEdit) =
   ## Remove all line decorations.
   s.lineDecorations.setLen 0
@@ -3495,6 +3521,9 @@ proc renderPass(s: var SynEdit; area: Rect; showCursor: bool) =
     if s.rowHighlight.line == thisLine:
       rowBg = s.rowHighlight.color
       banded = true
+    elif s.lineTints.len > 0 and thisLine in s.lineTints:
+      rowBg = s.lineTints[thisLine]
+      banded = true
     if showCursor and thisLine == s.currentLine.int:
       rowBg = s.theme.activeLineBg
       banded = true
@@ -3513,13 +3542,23 @@ proc renderPass(s: var SynEdit; area: Rect; showCursor: bool) =
       var numColor = if renderLine == s.currentLine: s.theme.fg[TokenClass.None]
                      else: s.theme.lineNumColor
       var numBg = if banded: rowBg else: s.theme.bg
-      for ld in s.lineDecorations:
-        if ld.line == renderLine.int:
-          # Draw a thin vertical bar on the left edge instead of a square.
-          # This matches standard editors (VS Code, etc.) and avoids jagged edges.
-          fillRect(rect(area.x, dim.y, 3, lineH), ld.color)
-          break
       discard drawText(s.font, area.x + px, dim.y, num, numColor, numBg)
+    # The decorations go in the padding at the left edge, which every widget
+    # has whether or not it shows line numbers -- a tab list marks its tabs
+    # there as well as an editor marks its lines. After the number, whose
+    # background would otherwise cover a tick drawn across the gutter.
+    for ld in s.lineDecorations:
+      if ld.line == renderLine.int:
+        case ld.kind
+        of decoBar:
+          # A thin vertical bar on the left edge rather than a square: what
+          # other editors do, and no jagged edges where bars meet.
+          fillRect(rect(area.x, dim.y, 3, lineH), ld.color)
+        of decoTickAbove, decoTickBelow:
+          # Across the gutter, so it reads as "between these two lines".
+          let w = max(8, (if s.showLineNumbers: px + spl else: px))
+          let y = if ld.kind == decoTickAbove: dim.y else: dim.y + lineH - 2
+          fillRect(rect(area.x, y, w, 2), ld.color)
 
     var nextI = i
     var consumedRows = 1

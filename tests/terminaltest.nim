@@ -211,6 +211,16 @@ block: # the prompt's own commands, which a terminal leaves to the programs
         a.kind == selectTheme and a.name == "mocha", $a.kind)
   a = p.ran("defaults")
   check("`defaults` is the prompt's as well", a.kind == resetConfig, $a.kind)
+  a = p.ran("diff")
+  check("a bare `diff` is the prompt's diff mode",
+        a.kind == diffMode and a.rev.len == 0, $a.kind)
+  a = p.ran("diff HEAD~2")
+  check("and names what to compare with", a.kind == diffMode and
+        a.rev == "HEAD~2", a.rev)
+  a = p.ran("hunk next")
+  check("`hunk next` walks down", a.kind == hunkJump and not a.up, $a.kind)
+  a = p.ran("hunk p")
+  check("`hunk p` walks up", a.kind == hunkJump and a.up, $a.kind)
 
   var t = newTerm()
   a = t.ran("theme mocha")

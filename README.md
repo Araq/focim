@@ -106,6 +106,7 @@ of a checkout of the library it is a vocabulary of.
 | [Completion](doc/completion.md) | `Ctrl+Space` offers the words that exist -- no compiler in the loop |
 | [Tracking](doc/track.md) | `Ctrl+click` asks one: where a name is declared, and everywhere it is used |
 | [Search and replace](doc/search.md) | `find`, `next`, `replaceall` -- no dialog, every match highlighted in place |
+| [Diff mode](doc/diff.md) | `diff` shows where a tab differs from `HEAD`, or from where its branch forked |
 | [The clipboard panel](doc/clipboard.md) | The last thirty texts that entered the clipboard, `Ctrl+1` .. `Ctrl+9` to paste one |
 
 The long version is the comment at the top of
