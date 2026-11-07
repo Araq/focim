@@ -125,7 +125,9 @@ proc readText(s: DirSearch; path: string; text: var string): bool =
     return false
   # A NUL near the start is a binary file: its "lines" are noise, and a click
   # into one is an editor full of garbage.
-  result = '\0' notin text[0 ..< min(text.len, 8000)]
+  for i in 0 ..< min(text.len, 2000):
+    if text[i] == '\0': return false
+  result = true
 
 proc searchFile(s: var DirSearch; path: string; output: var string) =
   var text = ""
