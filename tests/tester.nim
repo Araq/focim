@@ -71,6 +71,8 @@ exec "nim c -r tests/dirsearchtest.nim"
 # SynEdit paints for them.
 exec "nim c -r tests/gitdifftest.nim"
 exec "nim c -r tests/diffviewtest.nim"
+# The shortcuts table, the strip of keys that shows it, and their help.
+exec "nim c -r tests/shortcutstest.nim"
 
 # The editor itself, once, with the platform's default backend -- the one
 # thing here that pulls in a driver, and so the one thing that would notice a

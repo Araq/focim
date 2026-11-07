@@ -203,6 +203,7 @@ import focim/[synedit, terminal, config, wordindex, cliphistory, search,
               filesearch]
 import focim/track
 import focim/configstore
+import focim/shortcuts
 import focim/gitbranches
 import focim/dirsearch
 import focim/gitdiff
@@ -2144,6 +2145,7 @@ type
     shownTab: int                ## what the tab list was last scrolled to
     tabsHadFocus: bool           ## show, and whether it had the focus then
     buttons: PanelButtons        ## those of the panel the pointer is in
+    strip: ShortcutStrip         ## the keys left of the prompt
     btnSize: int
     pointerX, pointerY: int      ## where the pointer was last seen: a wheel
                                  ## event says nothing about where it was
@@ -3048,24 +3050,60 @@ proc prepareCommand(app: var App; cells: Table[string, Rect]; cmd: string) =
     # A layout without a status bar has nowhere to type it.
     app.tabs.note = "no 'status' cell in the layout"
 
-proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
-  ## The keys that mean something to the window rather than to the panel
-  ## that has the focus. Every one of them consumes the event.
-  let cmd = CtrlPressed in e.mods or GuiPressed in e.mods
-  if cmd and e.key == KeyS:
+proc runShortcut(app: var App; sc: Shortcut; cells: Table[string, Rect];
+                 up = false; clicked = false): bool =
+  ## What a shortcut of the table in `shortcuts.nim` does, pressed or clicked
+  ## on the strip: the same thing either way. False for one that means
+  ## nothing where the focus is, which leaves the key to the panel.
+  result = true
+  case sc
+  of scSave:
     saveCurrent(app.buffers, app.current, app.tabs.note)
-  elif cmd and e.key == KeyP:
+  of scOpen:
     # "Quick open", for the muscle memory every other editor has trained:
     # the prompt, with the command already typed, so that the file name is
     # all that is left to do. It is the ordinary `open` command -- Tab
     # completes it and Enter runs it like any other.
     app.prepareCommand(cells, "open ")
-  elif cmd and e.key == KeyF:
+  of scFind:
     # The same quick way in as Ctrl+P, for the other command one reaches
     # for without thinking. `find ` and not `f `: the long name is the one
     # that says what the line is about while it is being typed.
     app.prepareCommand(cells, "find ")
-  elif e.key == KeyF3:
+  of scNew:
+    app.newTab()
+  of scClose:
+    # Close the current tab by deleting its line, so that it goes through
+    # the tab list's undo stack like a hand-made deletion would.
+    app.tabs.ed.gotoLine(app.current + 1, 0)
+    app.tabs.ed.deleteLine()
+  of scBigger, scSmaller:
+    app.adjustFocusedFontSize(if sc == scSmaller: -1 else: 1)
+  of scComplete:
+    if not app.focus.isEditor: return false
+    app.comp.show(app.words, app.buffers[app.current].ed)
+    if not app.comp.active:
+      app.tabs.note = if app.comp.prefix.len > 0:
+                        "no word starts with '" & app.comp.prefix & "'"
+                      else: "no words indexed yet"
+  of scHunk:
+    # Only in diff mode: anywhere else the keys stay what SynEdit makes of
+    # them. A click means the file on screen wherever the focus is.
+    if not app.buffers[app.current].diff.on or
+       not (clicked or app.focus.isEditor):
+      return false
+    app.jumpHunk(up)
+
+proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
+  ## The keys that mean something to the window rather than to the panel
+  ## that has the focus. Every one of them consumes the event.
+  let cmd = CtrlPressed in e.mods or GuiPressed in e.mods
+  var sc: Shortcut
+  if matchShortcut(e, sc) and
+     app.runShortcut(sc, cells, up = e.key == KeyUp):
+    e = default Event
+    return
+  if e.key == KeyF3:
     # What every other editor puts there, and the reason `next` and `prev`
     # do not have to be typed to walk a search. Moving the finger while a
     # replace was asking about a match would answer for a different one,
@@ -3074,15 +3112,6 @@ proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
     gotoNextMatch(app.buffers, app.current, app.finder,
                   ShiftPressed in e.mods, app.theme, app.tabs.note)
     app.focus = gEditorCell
-  elif cmd and e.key == KeyN:
-    app.newTab()
-  elif cmd and e.key == KeyW:
-    # Close the current tab by deleting its line, so that it goes through
-    # the tab list's undo stack like a hand-made deletion would.
-    app.tabs.ed.gotoLine(app.current + 1, 0)
-    app.tabs.ed.deleteLine()
-  elif cmd and e.key in {KeyEqual, KeyPlus, KeyMinus}:
-    app.adjustFocusedFontSize(if e.key == KeyMinus: -1 else: 1)
   elif cmd and e.key in {Key1 .. Key9} and app.focus.isEditor and
        "clipboard" in cells:
     # The panel is numbered, so a row is taken by its number rather than by
@@ -3090,12 +3119,6 @@ proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
     # at, and the arrow keys stay where they belong.
     let text = app.clips.entry(ord(e.key) - ord(Key1) + 1)
     if text.len > 0: app.buffers[app.current].ed.insertText(text)
-  elif cmd and e.key == KeySpace and app.focus.isEditor:
-    app.comp.show(app.words, app.buffers[app.current].ed)
-    if not app.comp.active:
-      app.tabs.note = if app.comp.prefix.len > 0:
-                        "no word starts with '" & app.comp.prefix & "'"
-                      else: "no words indexed yet"
   elif app.focus.isEditor and
        app.comp.handleKey(e, app.buffers[app.current].ed):
     # While the listing is up a few keys belong to it. Everything else --
@@ -3107,11 +3130,6 @@ proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
       jumpTo(app.jumps[pick], app.buffers, app.current, app.editorFont,
              app.focus, app.tabs.note)
       app.jumps.setLen 0
-  elif AltPressed in e.mods and e.key in {KeyUp, KeyDown} and
-       app.focus.isEditor and app.buffers[app.current].diff.on:
-    # Only in diff mode: anywhere else the keys stay what SynEdit makes of
-    # them.
-    app.jumpHunk(e.key == KeyUp)
   elif e.key == KeyEnter and app.focus == "tabs":
     # Enter activates a tab instead of inserting a newline.
     let idx = app.tabs.ed.currentLine
@@ -3188,6 +3206,25 @@ proc pressPanelButtons(app: var App; e: var Event;
     of btnNone: discard
     app.buttons.hot = btnNone
     e = default Event
+
+proc pressShortcutKeys(app: var App; e: var Event;
+                       cells: Table[string, Rect]) =
+  ## The strip of keys left of the prompt, laid out for this frame and
+  ## clicked before anything else sees the click: before the focus moves to
+  ## the status bar, so that a key acts on the panel one was in -- `+` makes
+  ## that panel's text bigger, the space bar completes in that editor -- just
+  ## as its shortcut would.
+  if "status" notin cells:
+    app.strip = ShortcutStrip(hot: -1)
+    return
+  let diffOn = app.current < app.buffers.len and
+               app.buffers[app.current].diff.on
+  app.strip = layoutStrip(cells["status"], diffOn)
+  if e.kind == MouseDownEvent and e.button == LeftButton:
+    let k = app.strip.keyAt(e.x, e.y)
+    if k >= 0:
+      discard app.runShortcut(app.strip.keys[k].sc, cells, clicked = true)
+      e = default Event
 
 proc followActiveTab(app: var App) =
   ## The list follows the active tab, which is chosen anywhere but here:
@@ -3589,7 +3626,12 @@ proc drawStatus(app: var App; e: Event; cells: Table[string, Rect]) =
     app.redrawStatus()
   var act = TermAction(kind: noAction)
   if "status" in cells:
-    act = app.status.draw(e, cells["status"], app.focus == "status")
+    let area = cells["status"]
+    let w = min(app.strip.width, area.w)
+    fillRect(rect(area.x, area.y, w, area.h), app.theme.panelBg)
+    app.strip.drawStrip(app.fonts.fontForSize(app.statusFontSize), app.theme)
+    act = app.status.draw(e, rect(area.x + w, area.y, area.w - w, area.h),
+                          app.focus == "status")
   app.endExchange(act)
   app.runStatusAction(act)
 
@@ -3629,6 +3671,11 @@ proc drawOverlays(app: var App; cells: Table[string, Rect]) =
   # the buffer the keystrokes are landing in. Lighting up both says where
   # the text goes and which of the open files it goes into, in one glance.
   if app.focus.isEditor: app.frameCell(cells, "tabs")
+  # The help of the key under the pointer, over all of it -- the focus
+  # frames included, which would otherwise run straight through the box.
+  if "status" in cells:
+    app.strip.drawHelp(app.fonts.fontForSize(app.statusFontSize), app.theme,
+                       cells["status"], app.width)
 
 proc renderFrame(app: var App; e: var Event) =
   let lm = layoutMetrics(app.width, app.height, app.fm.lineHeight)
@@ -3661,8 +3708,10 @@ proc renderFrame(app: var App; e: var Event) =
              if app.dragging.found: app.theme.scrollBarActiveColor
              else: app.theme.scrollBarColor)
 
+  app.pressShortcutKeys(e, cells)
   app.handleEvent(e, cells)
   app.pressPanelButtons(e, cells)
+  app.strip.hot = app.strip.keyAt(app.pointerX, app.pointerY)
 
   # Widgets the layout leaves out are simply not drawn. They keep their
   # state, so they come back exactly as they were once a layout lists
