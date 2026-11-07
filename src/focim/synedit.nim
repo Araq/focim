@@ -155,6 +155,14 @@ type
     color: Color          ## color indicator shown in the line number gutter
     kind: DecorationKind
 
+  PhantomRows = object
+    ## Rows drawn above a line that are not text: no caret goes into them,
+    ## nothing selects them, saving and searching never meet them. What a
+    ## diff shows the deleted lines with.
+    rows: seq[string]
+    fg, bg, bar: Color    ## the text, the band behind it, the gutter bar
+    moreText: string      ## what the summary row says after its count
+
   RowHighlight = object
     line: int             ## line number (0-based), -1 for none
     color: Color          ## background for the whole row, text or no text
@@ -164,14 +172,16 @@ type
     ctrlHover,          ## ctrl+mouse move over text
     ctrlClick,          ## ctrl+click on text
     closeLine           ## the (x) button of a line was clicked
+    phantomClick        ## the summary row of a phantom block was clicked
 
   EditAction* = object
     case kind*: EditActionKind
     of noAction: discard
     of ctrlHover, ctrlClick:
       pos*: int         ## buffer offset
-    of closeLine:
-      line*: int        ## 0-based line whose (x) was clicked
+    of closeLine, phantomClick:
+      line*: int        ## 0-based line whose (x) was clicked, or whose
+                        ## phantom block's summary row
 
   ImageCacheEntry = object
     path: string
@@ -305,6 +315,9 @@ type
     # Line tints -- see setLineTint(). Any number of rows, each a color: what
     # a diff paints behind the lines it changed.
     lineTints: Table[int, Color]
+    # Phantom rows -- see setPhantomRows(), keyed by the line they stand above.
+    phantoms: Table[int, PhantomRows]
+    phantomHit: int     ## the line whose summary row a click landed on, -1
     # The buffer range of the row `render` is painting a band behind, and the
     # color of that band, so that the per-token backgrounds agree with it.
     # Set per row while rendering; `(0, -1)` is "no row".
@@ -2706,6 +2719,7 @@ proc createSynEdit*(font: Font; theme = defaultTheme()): SynEdit =
     selected: (-1, -1), bracketA: -1, bracketB: -1, hotLink: (-1, -1),
     readOnly: -1, tabSize: TabWidth, lang: langNim, editLow: high(int),
     actionLines: -1, closeLines: -1, closeHover: -1, activeRow: (0, -1),
+    phantomHit: -1,
     rowHighlight: RowHighlight(line: -1),
     font: font, theme: theme, flags: {},
     showLineNumbers: false, cursorVisible: true, lastBlinkTick: 0,
@@ -2991,6 +3005,31 @@ proc setLineTint*(s: var SynEdit; line: int; color: Color) =
 
 proc clearLineTints*(s: var SynEdit) =
   s.lineTints.clear()
+
+proc setPhantomRows*(s: var SynEdit; line: int; rows: seq[string];
+                     fg, bg, bar: Color; moreText = "more lines") =
+  ## Draw `rows` above `line` -- or, for `line` = the line count, after the
+  ## last line -- without them being text. They are read-only rows of their
+  ## own, with no line number, and a click on one puts the caret at the start
+  ## of `line`.
+  ##
+  ## A block taller than about a third of the widget shows that much and a
+  ## summary row, `… 180 more lines`: a block taller than the view could not
+  ## be scrolled through, since scrolling is by lines and the whole block
+  ## hangs off one. A click on the summary row comes back from `draw` as a
+  ## `phantomClick` for `line`, for the host to show the rest elsewhere.
+  if rows.len == 0:
+    s.phantoms.del line
+  else:
+    s.phantoms[line] = PhantomRows(rows: rows, fg: fg, bg: bg, bar: bar,
+                                   moreText: moreText)
+
+proc clearPhantomRows*(s: var SynEdit) =
+  s.phantoms.clear()
+
+proc phantomRowsAt*(s: SynEdit; line: int): seq[string] =
+  ## What `setPhantomRows` put above `line`, all of it; @[] for nothing.
+  if line in s.phantoms: s.phantoms[line].rows else: @[]
 
 proc clearLineDecorations*(s: var SynEdit) =
   ## Remove all line decorations.
@@ -3444,6 +3483,57 @@ proc scrollGrip(s: SynEdit; area: Rect; lineH: int): Rect =
   result = rect(area.x + area.w - ScrollBarWidth, gripY,
                 ScrollBarWidth - 2, gripH)
 
+proc fitRow(s: SynEdit; text: string; width: int): string =
+  ## `text` as one row of `width` pixels: tabs as the buffer shows them, and
+  ## cut -- at a rune, never inside one -- with an ellipsis when it does not
+  ## fit. A phantom row is not wrapped: it is a reminder of a line, and the
+  ## line itself is a click away.
+  result = ""
+  for c in text:
+    if c == '\t':
+      for _ in 1 .. s.tabSize: result.add ' '
+    elif c notin {'\r', '\n'}:
+      result.add c
+  if measureText(s.font, result).w <= width: return
+  var cut = result.len
+  while cut > 0:
+    dec cut
+    while cut > 0 and (result[cut].ord and 0xC0) == 0x80: dec cut
+    if measureText(s.font, result[0 ..< cut] & Ellipsis).w <= width: break
+  result = result[0 ..< cut] & Ellipsis
+
+proc drawPhantoms(s: var SynEdit; line, lineStart: int; area: Rect;
+                  dim: var Rect; edgeX, endX, endY, lineH: int) =
+  ## The phantom block above `line`, as many of its rows as the cap and the
+  ## widget's height allow. `lineStart` is where a click on one puts the
+  ## caret: the start of the line the block stands above.
+  let p = s.phantoms[line]
+  # About a third of the widget, and never fewer than three rows: a deletion
+  # that big is better read in full somewhere with room for it.
+  let cap = max(3, ((endY - area.y) div max(1, lineH)) div 3)
+  let shown = if p.rows.len > cap: cap - 1 else: p.rows.len
+  let rows = shown + (if p.rows.len > cap: 1 else: 0)
+  for k in 0 ..< rows:
+    if dim.y + lineH >= endY: break
+    let summary = k == shown
+    fillRect(rect(area.x, dim.y, edgeX - area.x + 1, lineH), p.bg)
+    fillRect(rect(area.x, dim.y, 3, lineH), p.bar)
+    let text =
+      if summary: Ellipsis & " " & $(p.rows.len - shown) & " " & p.moreText
+      else: s.fitRow(p.rows[k], endX - dim.x)
+    discard drawText(s.font, dim.x, dim.y, text,
+                     if summary: s.theme.lineNumColor else: p.fg, p.bg)
+    if s.clicks > 0 and s.mouseY >= dim.y and s.mouseY < dim.y + lineH:
+      # Not text, so no place in it: the caret goes to the line below, the
+      # one the block belongs to -- and the summary row asks for the rest.
+      s.cursor = lineStart.Natural
+      s.setCurrentLine()
+      s.clicks = 0
+      s.cursorMoved()
+      if summary: s.phantomHit = line
+    inc dim.y, lineH
+    inc s.span
+
 proc renderPass(s: var SynEdit; area: Rect; showCursor: bool) =
   ## One pass over the visible lines. `render` is what callers want: this
   ## draws with `firstLine` as it stands and reports, through `cursorDim`,
@@ -3511,6 +3601,9 @@ proc renderPass(s: var SynEdit; area: Rect; showCursor: bool) =
 
   while dim.y + fontSize < endY and i <= s.len:
     let thisLine = renderLine.int
+    if s.phantoms.len > 0 and thisLine in s.phantoms:
+      s.drawPhantoms(thisLine, i, area, dim, edgeX, endX, endY, lineH)
+      if dim.y + fontSize >= endY: break
     # Two things want a band across the whole row: a row highlight the app has
     # set, and -- while this widget has the focus -- the line the caret is on.
     # A panel nobody is typing in has no current line worth pointing at, and
@@ -3603,6 +3696,11 @@ proc renderPass(s: var SynEdit; area: Rect; showCursor: bool) =
     inc s.span, consumedRows
     inc renderLine
   s.activeRow = (0, -1)
+  # A block after the last line: what a diff deleted at the very end of a
+  # file that does not end in a newline.
+  if s.phantoms.len > 0 and renderLine.int in s.phantoms and
+     dim.y + fontSize < endY:
+    s.drawPhantoms(renderLine.int, s.len, area, dim, edgeX, endX, endY, lineH)
 
   while dim.y + fontSize < endY:
     inc dim.y, lineH
@@ -3854,7 +3952,10 @@ proc draw*(s: var SynEdit; e: Event; area: Rect; focused: bool): EditAction =
   s.render(area, showCursor = focused)
 
   # After rendering, probe and click positions have been resolved.
-  if e.kind == MouseDownEvent and (LinkMod in e.mods) and
+  if s.phantomHit >= 0:
+    result = EditAction(kind: phantomClick, line: s.phantomHit)
+    s.phantomHit = -1
+  elif e.kind == MouseDownEvent and (LinkMod in e.mods) and
      area.contains(point(e.x, e.y)):
     result = EditAction(kind: ctrlClick, pos: s.cursor.int)
   elif s.probeActive and s.probeResult >= 0:

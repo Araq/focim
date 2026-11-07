@@ -26,8 +26,9 @@ the same:
 
 - a line the base does not have: a green bar at its edge, and a green tint
 - a line that replaces lines of the base: the same, in yellow
-- lines of the base that are gone: a red tick between the two lines they
-  stood between
+- lines of the base that are gone: shown where they stood, on a red band,
+  dimmed -- and for a change, the old lines above the ones that replaced
+  them, so old and new read top to bottom
 
 The status bar says what the tab is compared with -- `diff vs HEAD: 3 hunks`
 -- and the tab list marks every tab in diff mode with a bar of its own.
@@ -49,7 +50,18 @@ The files a switch in the branches panel opens come up in `diff branch` mode
 stays open across a later switch is compared with the new branch's fork, and
 on the default branch itself, which has no fork, it leaves diff mode.
 
+## Deleted lines
+
+The lines the base had are drawn between the lines of the file, but they
+are not text: the caret does not go into them, a selection does not take
+them, and saving, searching and the word index never see them. A click on
+one puts the caret on the line below it.
+
+A block of them is shown up to about a third of the panel's height, and
+then a row that says how many more there are -- `… 180 more deleted lines`.
+A click on that row prints the whole hunk in the terminal, as `git diff`
+would, with a `path:line:` above it that goes back to it.
+
 ## Not yet
 
-The deleted lines themselves are not shown, only where they were; showing
-them between the lines, reverting a hunk and staging one are the next steps.
+Reverting a hunk and staging one are the next steps.

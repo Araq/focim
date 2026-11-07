@@ -2516,23 +2516,28 @@ proc decorateDiff(b: var BufferEntry; theme: Theme) =
   ## where lines were deleted.
   b.ed.clearLineDecorations()
   b.ed.clearLineTints()
+  b.ed.clearPhantomRows()
   if not b.diff.on: return
-  let lineCount = b.ed.getLineCount()
+  let red = theme.fg[TokenClass.Red]
+  let gone = blend(red, theme.bg, 14)
+  # What is gone is read, not worked on: a step dimmer than the text.
+  let goneText = blend(theme.fg[TokenClass.None], theme.bg, 70)
   for h in b.diff.hunks:
-    case h.kind
-    of hunkAdded, hunkChanged:
+    if h.kind in {hunkAdded, hunkChanged}:
       let c = if h.kind == hunkAdded: theme.fg[TokenClass.Green]
               else: theme.fg[TokenClass.Yellow]
       let tint = blend(c, theme.bg, 14)
       for l in h.line ..< h.line + h.lines:
         b.ed.addLineDecoration(l, c, decoBar)
         b.ed.setLineTint(l, tint)
-    of hunkDeleted:
-      # Between the lines the deleted ones stood between. Lines deleted at the
-      # very end have no line below them, so they are marked under the last.
-      let red = theme.fg[TokenClass.Red]
-      if h.line < lineCount: b.ed.addLineDecoration(h.line, red, decoTickAbove)
-      else: b.ed.addLineDecoration(lineCount - 1, red, decoTickBelow)
+    if h.kind in {hunkDeleted, hunkChanged}:
+      # The lines of the base that are gone, between the lines they stood
+      # between -- for a change, above the lines that replaced them, so the
+      # old and the new read top to bottom. Phantom rows: drawn, never text.
+      b.ed.setPhantomRows(h.line, b.diff.base[h.baseLine ..< h.baseLine + h.baseLines],
+                          goneText, gone, red,
+                          if h.kind == hunkDeleted: "more deleted lines"
+                          else: "more replaced lines")
 
 proc diffLabel(d: DiffView): string =
   ## What the status bar says while a tab is in diff mode -- a tinted gutter
@@ -2625,6 +2630,26 @@ proc checkDiffBases(app: var App) =
   if dropped > 0:
     app.tabs.note.add (if app.tabs.note.len > 0: "; " else: "") &
       "diff off for " & $dropped & (if dropped == 1: " tab" else: " tabs")
+
+proc showHunk(app: var App; line: int) =
+  ## A click on the summary row of a block too big to show: the whole hunk in
+  ## the terminal, as `git diff` would print it -- where the console
+  ## highlighter colors it, and where it can be read from top to bottom.
+  template b: untyped = app.buffers[app.current]
+  let i = hunkAt(b.diff.hunks, line)
+  if i < 0: return
+  let h = b.diff.hunks[i]
+  let text = b.ed.fullText.textLines
+  let rel = relativePath(b.path, app.term.base)
+  var listing = rel & ":" & $(h.line + 1) & ": hunk " & $(i + 1) & "/" &
+            $b.diff.hunks.len & " against " & b.diff.rev & "\L"
+  listing.add "@@ -" & $(h.baseLine + 1) & "," & $h.baseLines & " +" &
+          $(h.line + 1) & "," & $h.lines & " @@\L"
+  for k in h.baseLine ..< h.baseLine + h.baseLines: listing.add "-" & b.diff.base[k] & "\L"
+  for k in h.line ..< min(h.line + h.lines, text.len): listing.add "+" & text[k] & "\L"
+  if not app.term.printOutput(listing):
+    app.tabs.note = "the terminal is busy; the hunk is " & $h.baseLines &
+                    " lines from line " & $(h.line + 1)
 
 proc jumpHunk(app: var App; up: bool) =
   ## `hunk next` / `hunk prev`, Alt+Down / Alt+Up: to the next hunk, round
@@ -3354,6 +3379,8 @@ proc runEditAction(app: var App; act: EditAction) =
       else: ed.underline(-1, -1)
   of closeLine:
     discard # the editor has no close buttons
+  of phantomClick:
+    app.showHunk(act.line)
   of noAction:
     ed.underline(-1, -1)
 

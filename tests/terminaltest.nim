@@ -262,6 +262,16 @@ block: # `search`, whose output the host writes in a slice at a time
         not t.searching and t.commandLine == "ls" and
         t.allText.contains("1 lines in 1 files"), t.allText)
 
+  var o = newTerm()
+  o.typeText("make")
+  check("the host can print into it", o.printOutput("@@ -1,1 +1,0 @@\L-gone\L"))
+  check("under the prompt, with the typing kept for the next one",
+        o.allText.contains("\L@@ -1,1 +1,0 @@\L-gone\L") and
+        o.commandLine == "make", o.allText)
+  o.beginSearch()
+  check("but not into a search's output", not o.printOutput("x"))
+  o.endSearch("done")
+
   var p = createTerminal(font)
   p.isPrompt = true
   p.insertPrompt()

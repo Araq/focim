@@ -2,10 +2,12 @@
 ## lines, tints behind the rows. Watched through stub relays that record the
 ## rectangles, since the colors are the whole of the feature.
 import uirelays/[screen, coords, input]
+import std/strutils
 import focim/synedit
 
 type Fill = tuple[r: Rect; c: Color]
 var fills: seq[Fill] = @[]
+var texts: seq[tuple[x, y: int; s: string]] = @[]
 
 fontRelays = FontRelays(
   openFont: proc (path: string; size: int; style: FontStyles;
@@ -19,6 +21,7 @@ fontRelays = FontRelays(
     TextExtent(w: text.len * 8, h: 16),
   drawText: proc (f: Font; x, y: int; text: string;
                   fg, bg: Color): TextExtent =
+    texts.add((x, y, text))
     TextExtent(w: text.len * 8, h: 16))
 drawRelays = DrawRelays(
   fillRect: proc (r: Rect; color: Color) = fills.add((r, color)),
@@ -106,6 +109,87 @@ block:
   check("the caret's band wins over a tint",
         fillsAt(ed.rowY(1), ed.theme.activeLineBg).len > 0 and
         fillsAt(ed.rowY(1), tint).len == 0)
+
+echo "phantom rows:"
+proc textAt(y: int): string =
+  ## Everything drawn on the row at `y`, left to right, glued together.
+  for t in texts:
+    if t.y == y: result.add t.s
+
+block:
+  var ed = createSynEdit(font)
+  ed.lang = langNone
+  ed.setText("one\ntwo\nthree\n")
+  ed.gotoPos(0)
+  ed.setPhantomRows(1, @["old a", "old b"], color(200, 200, 200), tint, red)
+  fills.setLen 0
+  texts.setLen 0
+  ed.render(Area, showCursor = false)
+  check("they come above their line, in order",
+        textAt(ed.rowY(1)) == "old a" and textAt(ed.rowY(2)) == "old b",
+        textAt(ed.rowY(1)) & "|" & textAt(ed.rowY(2)))
+  check("and push the line down below them", textAt(ed.rowY(3)) == "two",
+        textAt(ed.rowY(3)))
+  check("on a band of their own, with a bar",
+        fillsAt(ed.rowY(1), tint).len > 0 and fillsAt(ed.rowY(1), red).len > 0)
+  check("they are not text", ed.fullText == "one\ntwo\nthree\n")
+
+  # A click on one puts the caret at the start of the line it stands above.
+  var click = Event(kind: MouseDownEvent, x: 50, y: ed.rowY(2) + 3,
+                    button: LeftButton, clicks: 1)
+  texts.setLen 0
+  let act = ed.draw(click, Area, focused = true)
+  check("a click on one goes to the line below it",
+        ed.currentLine == 1 and ed.cursor == 4 and act.kind == noAction,
+        $ed.currentLine & " " & $ed.cursor & " " & $act.kind)
+
+block:
+  var ed = createSynEdit(font)
+  ed.lang = langNone
+  ed.setText("one\ntwo\n")
+  var many: seq[string] = @[]
+  for k in 1 .. 50: many.add "gone " & $k
+  ed.setPhantomRows(1, many, color(200, 200, 200), tint, red, "deleted lines")
+  texts.setLen 0
+  ed.render(Area, showCursor = false)
+  # 200 pixels, 16 a row: twelve rows, a third of that is four.
+  let summaryY = ed.rowY(4)
+  check("a big block shows a third of the widget",
+        textAt(ed.rowY(3)) == "gone 3" and textAt(summaryY).contains("47 deleted lines"),
+        textAt(ed.rowY(3)) & "|" & textAt(summaryY))
+  check("and then the line it stands above", textAt(ed.rowY(5)) == "two",
+        textAt(ed.rowY(5)))
+  let act = ed.draw(Event(kind: MouseDownEvent, x: 50, y: summaryY + 3,
+                          button: LeftButton, clicks: 1), Area, focused = true)
+  check("a click on the summary row asks for the rest",
+        act.kind == phantomClick and act.line == 1, $act.kind)
+  check("and the phantom text can be had back", ed.phantomRowsAt(1).len == 50)
+  ed.clearPhantomRows()
+  check("cleared, none are left", ed.phantomRowsAt(1).len == 0)
+
+block:
+  var ed = createSynEdit(font)
+  ed.lang = langNone
+  ed.setText("one\ntwo")          # no final newline: two lines
+  ed.setPhantomRows(2, @["the end"], color(200, 200, 200), tint, red)
+  texts.setLen 0
+  ed.render(Area, showCursor = false)
+  check("a block at the line count comes after the last line",
+        textAt(ed.rowY(2)) == "the end", textAt(ed.rowY(2)))
+
+block:
+  var ed = createSynEdit(font)
+  ed.lang = langNone
+  ed.setText("x\n")
+  ed.setPhantomRows(0, @["\tindented " & "w".repeat(80)],
+                    color(200, 200, 200), tint, red)
+  texts.setLen 0
+  ed.render(Area, showCursor = false)
+  let row = textAt(ed.rowY(0))
+  check("a long row is cut to fit, with an ellipsis, tabs as spaces",
+        row.startsWith(" ") and '\t' notin row and "indented" in row and
+        row.endsWith("\xE2\x80\xA6") and
+        row.len * 8 < 420, row)
 
 echo(if failures == 0: "ALL PASS" else: $failures & " FAILURE(S)")
 if failures > 0: quit 1

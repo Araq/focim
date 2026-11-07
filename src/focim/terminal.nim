@@ -817,6 +817,23 @@ proc endSearch*(t: var Terminal; summary: string) =
     t.ed.scrollToOutput(t.outputStart)
     t.outputStart = -1
 
+proc printOutput*(t: var Terminal; text: string): bool =
+  ## Text the host has to show, written as if a command had printed it: on
+  ## lines of its own under the prompt, with a fresh prompt after it, the view
+  ## left at the top of it, and whatever was half typed still on the command
+  ## line. False while a program or a `search` owns the output -- their lines
+  ## and these would end up in the middle of each other.
+  if t.processRunning or t.searching: return false
+  let typed = t.getCommand()
+  if typed.len > 0: t.emptyCmd()
+  t.endOutput()
+  let start = t.ed.len
+  t.ed.appendOutput("\L" & text & (if text.endsWith('\L'): "" else: "\L"))
+  t.insertPrompt()
+  if typed.len > 0: t.ed.insertText(typed)
+  t.ed.scrollToOutput(start)
+  result = true
+
 proc parseSearch(t: Terminal; cmd: string; i: int): TermAction =
   ## `search <text> [options] [--exclude <pattern>]...`, where an exclude is
   ## also `--exclude=<pattern>`, and either may list several, comma separated.
@@ -1244,4 +1261,4 @@ proc draw*(t: var Terminal; e: Event; area: Rect; focused: bool): TermAction =
     result = TermAction(kind: ctrlHover, pos: edAct.pos)
   of ctrlClick:
     result = TermAction(kind: ctrlClick, pos: edAct.pos)
-  of noAction, closeLine: discard
+  of noAction, closeLine, phantomClick: discard
