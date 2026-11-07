@@ -1611,7 +1611,11 @@ proc saveCurrent(buffers: var seq[BufferEntry]; current: int;
 
 proc saveBufferAs(buffers: var seq[BufferEntry]; current: int; path: string;
                   note: var string) =
-  ## Write the buffer to `path` and let it belong there from now on.
+  ## Write the buffer to `path` and let it belong there from now on. For an
+  ## untitled tab that is a rename: the file it was is removed once the new
+  ## one is written -- written, not moved, so it works from the config dir to
+  ## any other disk.
+  let old = buffers[current].path
   try:
     buffers[current].ed.saveToFile(path)
   except CatchableError:
@@ -1634,6 +1638,11 @@ proc saveBufferAs(buffers: var seq[BufferEntry]; current: int; path: string;
   buffers[current].watch = true
   buffers[current].timestamp = fileStamp(full)
   note = ""
+  if old.isUntitled and cmpPaths(old, full) != 0:
+    try:
+      removeFile(old)
+    except CatchableError:
+      note = "saved; " & old & " could not be removed"
 
 type
   SaveOutcome = enum
@@ -2793,6 +2802,18 @@ proc pollTracker(app: var App) =
                     app.buffers[app.current].ed)
     app.focus = gEditorCell
 
+proc saveUntitled(app: var App) =
+  ## An untitled tab is written back as it changes, like the two lanes: it is
+  ## the editor's own file, and what is in it was never anywhere else.
+  for b in app.buffers.mitems:
+    if b.ed.changed and b.path.isUntitled:
+      try:
+        b.ed.saveToFile(b.path)
+        b.timestamp = fileStamp(b.path)
+        b.ed.markSaved()
+      except CatchableError:
+        app.tabs.note = "cannot save " & b.path & ": " & getCurrentExceptionMsg()
+
 proc lookAround(app: var App) =
   app.reparseLanes()
   app.spreadTheme()
@@ -3002,6 +3023,21 @@ proc explorerEnter(app: var App) =
     app.explorer.activateEntry(idx, app.buffers, app.current, app.editorFont,
                                app.focus, app.term.cwd, app.tabs.note)
 
+proc newTab(app: var App) =
+  ## Ctrl+N: a new tab onto a new file, `untitled-N.txt` in the config dir.
+  ## A file and not a buffer with no file behind it: it saves itself as it is
+  ## typed (see `saveUntitled`), the session reopens it, and closing it loses
+  ## nothing -- `s <name>` is what moves it to where it belongs.
+  var taken: seq[string] = @[]
+  for b in app.buffers: taken.add b.path
+  let path = freshUntitled(taken)
+  if path.len == 0:
+    app.tabs.note = "cannot write " & untitledDir()
+    return
+  app.current = app.buffers.openFile(app.editorFont, path, -1, -1)
+  app.showInActivePanel()
+  app.focus = gEditorCell
+
 proc prepareCommand(app: var App; cells: Table[string, Rect]; cmd: string) =
   ## Ctrl+P and Ctrl+F: the prompt, with the command already typed.
   if "status" in cells:
@@ -3038,6 +3074,8 @@ proc handleKey(app: var App; e: var Event; cells: Table[string, Rect]) =
     gotoNextMatch(app.buffers, app.current, app.finder,
                   ShiftPressed in e.mods, app.theme, app.tabs.note)
     app.focus = gEditorCell
+  elif cmd and e.key == KeyN:
+    app.newTab()
   elif cmd and e.key == KeyW:
     # Close the current tab by deleting its line, so that it goes through
     # the tab list's undo stack like a hand-made deletion would.
@@ -3640,7 +3678,9 @@ proc renderFrame(app: var App; e: var Event) =
   app.drawStatus(e, cells)
   app.drawOverlays(cells)
 
-  # Persist the session once everything that could have changed it has run.
+  # Persist the session once everything that could have changed it has run --
+  # and the untitled tabs with it, in the frame the typing happened in.
+  app.saveUntitled()
   let tt = tabsText(app.buffers)
   if tt != app.savedTabs:
     app.savedTabs = tt

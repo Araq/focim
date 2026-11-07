@@ -217,5 +217,25 @@ block:
 
 removeDir sandbox
 
+# ---------------------------------------------------------------------------
+echo "untitled files:"
+# ---------------------------------------------------------------------------
+
+block:
+  let first = freshUntitled([])
+  check("the first is untitled-1.txt, under the config dir",
+        first == untitledDir() / "untitled-1.txt" and fileExists(first), first)
+  check("and is one of them", first.isUntitled)
+  check("a file elsewhere is not, whatever it is called",
+        not isUntitled(getTempDir() / "untitled-1.txt"))
+  writeFile(first, "kept")
+  let second = freshUntitled([])
+  check("one with something in it is not handed out again",
+        second == untitledDir() / "untitled-2.txt", second)
+  check("nor is one a tab has open, empty or not",
+        freshUntitled([second]) == untitledDir() / "untitled-3.txt")
+  check("but an empty one nobody has open is reused",
+        freshUntitled([]) == second)
+
 echo(if failures == 0: "ALL PASS" else: $failures & " FAILURE(S)")
 if failures > 0: quit 1

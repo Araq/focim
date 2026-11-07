@@ -3,6 +3,15 @@
 `o <name>` / `open <name>`, in the terminal or on the prompt. `Ctrl+P` is the
 prompt with `open ` already typed into it.
 
+`Ctrl+N` opens a new tab onto a new file: `untitled-1.txt`, `untitled-2.txt`
+and so on, in an `untitled` directory under the config dir. It is a file from
+the first keystroke, so nothing typed into it can be lost -- it saves itself as
+it is typed, it comes back with the session, and closing it leaves the file
+where it is. `s <name>` moves it to where it belongs: the text goes to the new
+name, and the untitled file is removed. The number is the lowest one free; an
+untitled file that is empty and not open is used again rather than counted
+past.
+
 There is no file dialog and no fuzzy-finder window. What there is instead is a
 name, typed with as much of it left out as one can get away with:
 
