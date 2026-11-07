@@ -191,5 +191,95 @@ block:
         row.endsWith("\xE2\x80\xA6") and
         row.len * 8 < 420, row)
 
+echo "the scroll bar:"
+block:
+  var ed = createSynEdit(font)
+  ed.lang = langNone
+  var text = ""
+  for k in 0 ..< 100: text.add "line " & $k & "\n"
+  ed.setText(text)                 # 101 lines, a 200 pixel widget: it scrolls
+  ed.gotoPos(0)
+  let yellow = color(220, 200, 0)
+  for l in 40 ..< 50: ed.addLineDecoration(l, yellow, decoBar)
+  ed.setPhantomRows(80, @["gone"], color(200, 200, 200), tint, red)
+  # The first frame is what tells the widget how many rows it has, and so
+  # whether it needs a scroll bar at all; the second one has it.
+  ed.render(Area, showCursor = false)
+  fills.setLen 0
+  ed.render(Area, showCursor = false)
+  let trackX = Area.x + Area.w - ScrollBarWidth
+  proc inTrack(c: Color): seq[Rect] =
+    for f in fills:
+      if f.c == c and f.r.x >= trackX: result.add f.r
+  let hunk = inTrack(yellow)
+  check("a run of marked lines is one mark in the track", hunk.len == 1, $hunk)
+  check("in the left half of the track",
+        hunk.len == 1 and hunk[0].x == trackX + 1 and
+        hunk[0].w < ScrollBarWidth div 2 + 1, $hunk)
+  let gone = inTrack(red)
+  check("deleted lines are marked too, in their color",
+        gone.len == 1 and gone[0].h >= 2, $gone)
+  check("further down than the earlier hunk",
+        gone.len == 1 and hunk.len == 1 and gone[0].y > hunk[0].y + hunk[0].h)
+
+  # What counts: a hunk that is on screen is marked under the grip, wherever
+  # the view is -- the grip is at least 20 pixels tall, more than the share
+  # of the buffer it stands for, and the marks have to go by the same map.
+  for first in [0, 35, 40, 44, 70, 80, 90]:
+    ed.scrollTo(first)
+    ed.render(Area, showCursor = false)
+    fills.setLen 0
+    ed.render(Area, showCursor = false)
+    var grip: Rect
+    for f in fills:
+      if f.c == ed.theme.scrollBarColor and f.r.x >= trackX: grip = f.r
+    for (line, c) in [(40, yellow), (49, yellow), (80, red)]:
+      if line >= first and line < first + 10:   # on screen
+        var under = false
+        for m in inTrack(c):
+          if m.y < grip.y + grip.h and m.y + m.h > grip.y: under = true
+        check("line " & $line & " on screen from line " & $first &
+              " is marked under the grip", under, $grip & " " & $inTrack(c))
+
+block:
+  # The case it went wrong in: a long file, where the 20 pixel grip is far
+  # taller than the share of the file on screen, viewed near its end with
+  # the hunk low in the view.
+  var ed = createSynEdit(font)
+  ed.lang = langNone
+  var text = ""
+  for k in 0 ..< 3000: text.add "line " & $k & "\n"
+  ed.setText(text)
+  ed.gotoPos(0)
+  let green2 = color(0, 210, 0)
+  for l in 2905 ..< 2910: ed.addLineDecoration(l, green2, decoBar)
+  ed.scrollTo(2900)
+  ed.render(Area, showCursor = false)
+  fills.setLen 0
+  ed.render(Area, showCursor = false)
+  let trackX = Area.x + Area.w - ScrollBarWidth
+  var grip: Rect
+  var mark: Rect
+  for f in fills:
+    if f.r.x >= trackX:
+      if f.c == ed.theme.scrollBarColor: grip = f.r
+      elif f.c == green2: mark = f.r
+  check("near the end of a long file, a hunk low on screen is under the grip",
+        mark.h > 0 and mark.y >= grip.y and mark.y + mark.h <= grip.y + grip.h,
+        "grip " & $grip & " mark " & $mark)
+
+block:
+  var ed = createSynEdit(font)
+  ed.setText("short\n")
+  ed.addLineDecoration(0, red, decoBar)
+  ed.render(Area, showCursor = false)
+  fills.setLen 0
+  ed.render(Area, showCursor = false)
+  var inTrack = 0
+  for f in fills:
+    if f.c == red and f.r.x >= Area.x + Area.w - ScrollBarWidth: inc inTrack
+  check("a buffer that does not scroll has no scroll bar to mark",
+        inTrack == 0)
+
 echo(if failures == 0: "ALL PASS" else: $failures & " FAILURE(S)")
 if failures > 0: quit 1
