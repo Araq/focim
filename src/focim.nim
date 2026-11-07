@@ -3665,16 +3665,17 @@ proc drawOverlays(app: var App; cells: Table[string, Rect]) =
   if app.buttons.cell.len > 0 and app.buttons.cell in cells:
     drawPanelButtons(app.buttons, cells[app.buttons.cell], app.btnSize,
                      app.theme)
-  # The help of the key under the pointer, over all of it.
-  if "status" in cells:
-    app.strip.drawHelp(app.fonts.fontForSize(app.statusFontSize), app.theme,
-                       cells["status"], app.width)
   app.frameCell(cells, app.focus)
   # The tab list is framed along with the editor, not instead of it: it is
   # less a panel of its own than the editor's label, and the row it marks is
   # the buffer the keystrokes are landing in. Lighting up both says where
   # the text goes and which of the open files it goes into, in one glance.
   if app.focus.isEditor: app.frameCell(cells, "tabs")
+  # The help of the key under the pointer, over all of it -- the focus
+  # frames included, which would otherwise run straight through the box.
+  if "status" in cells:
+    app.strip.drawHelp(app.fonts.fontForSize(app.statusFontSize), app.theme,
+                       cells["status"], app.width)
 
 proc renderFrame(app: var App; e: var Event) =
   let lm = layoutMetrics(app.width, app.height, app.fm.lineHeight)
