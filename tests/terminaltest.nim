@@ -223,5 +223,41 @@ block: # what marks the cached branch stale
   check("a `git` is seen the same way", mentionsWord("git init", "git"))
   check("and `digit` is not one", not mentionsWord("echo digital", "git"))
 
+block: # `search`, whose output the host writes in a slice at a time
+  proc ran(t: var Terminal; line: string): TermAction =
+    var cmd = line
+    result = t.runCommand(cmd)
+
+  var t = newTerm()
+  t.cwd = "/somewhere"
+  var a = t.ran("search 'two words' w --exclude nimcache -x *.c --exclude=a,b")
+  check("`search` is the terminal's own command", a.kind == searchFiles,
+        $a.kind)
+  check("its text may have a space in it", a.pattern == "two words",
+        a.pattern)
+  check("the option letters are find's", a.flags == "w", a.flags)
+  check("every spelling of an exclude is collected",
+        a.excludes == @["nimcache", "*.c", "a,b"], $a.excludes)
+  check("and it searches where the terminal is", a.dir == "/somewhere", a.dir)
+
+  t.beginSearch()
+  t.typeText("ls")
+  t.searchOutput("x.nim:1:1: hit\L")
+  check("results go in above what is being typed", t.commandLine == "ls" and
+        t.allText.contains("hit\Lls"), t.allText)
+  t.frame(key(KeyC, {CtrlPressed}))
+  check("Ctrl+C asks the search to stop", t.stopSearch)
+  t.endSearch("1 lines in 1 files")
+  check("its end puts the prompt back, with the typing still on it",
+        not t.searching and t.commandLine == "ls" and
+        t.allText.contains("1 lines in 1 files"), t.allText)
+
+  var p = createTerminal(font)
+  p.isPrompt = true
+  p.insertPrompt()
+  a = p.ran("search foo")
+  check("the prompt hands it over without a directory, to be told where to " &
+        "type it", a.kind == searchFiles and a.dir.len == 0, $a.kind)
+
 echo(if failures == 0: "ALL PASS" else: $failures & " FAILURE(S)")
 if failures > 0: quit 1

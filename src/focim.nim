@@ -204,6 +204,7 @@ import focim/[synedit, terminal, config, wordindex, cliphistory, search,
 import focim/track
 import focim/configstore
 import focim/gitbranches
+import focim/dirsearch
 import focim/completion
 import focim/panels
 import focim/images
@@ -1303,7 +1304,9 @@ proc handleTermCtrlClick(buf: SynEdit; pos: int;
     var lsCmd = "ls"
     discard term.runCommand(lsCmd)
   elif fileExists(path):
-    current = buffers.openFile(font, path, ln, fc)
+    # Columns are counted from 1 in what compilers and `search` print, and
+    # `gotoLine` takes how many characters to step over: one fewer.
+    current = buffers.openFile(font, path, ln, max(fc - 1, 0))
     focus = gEditorCell
 
 proc splitMarkdownTarget(url: string): tuple[path, frag: string] =
@@ -2135,6 +2138,8 @@ type
     finder: Finder               ## the last search
     asked: Ask                   ## what the prompt is waiting to hear about
     tracker: Tracker             ## the outstanding "where is this name?"
+    grep: DirSearch              ## the `search` being written into
+    grepCell: string             ## the terminal panel it is written into
     jumps: seq[TrackHit]         ## and the places its answer named
 
     running: bool
@@ -2411,7 +2416,7 @@ proc waitForEvent(app: var App): Event =
   ## and never longer than the next frame is due in.
   result = default Event
   let waitMs = min(
-    if app.job.active: 0
+    if app.job.active or app.grep.active: 0
     elif app.tracker.busy or anyRunning(app.terms): WorkPollMs
     else: IdleFrameMs,
     max(0, app.nextFrame - getTicks()))
@@ -2531,6 +2536,58 @@ proc stepWordIndex(app: var App) =
        else: "")
     app.job = IndexJob()
 
+proc searchTerminal(app: var App): int =
+  ## The panel the running `search` writes into, -1 once it has gone.
+  result = -1
+  for i in 0 ..< app.terms.len:
+    if app.terms[i].cell == app.grepCell: return i
+
+proc finishSearch(app: var App; stopped: bool) =
+  let i = app.searchTerminal()
+  app.grep.stop()
+  if i >= 0:
+    app.terms[i].term.endSearch(app.grep.summary(stopped))
+  app.grepCell = ""
+  app.mustDraw = true
+
+proc startSearch(app: var App; act: TermAction) =
+  ## `search` in the terminal: every file under the directory it is in. One
+  ## at a time -- a second one, from any terminal, ends the first.
+  if app.grep.active: app.finishSearch(stopped = true)
+  # A tab with edits in it is searched as the tab has it: those are the
+  # lines a click on the result will land in.
+  var unsaved = initTable[string, string]()
+  for b in app.buffers:
+    if b.path.len > 0 and b.ed.changed: unsaved[b.path] = b.ed.fullText
+  app.grep = startDirSearch(act.dir, act.pattern, parseSearchOptions(act.flags),
+                            act.excludes, unsaved)
+  app.grepCell = app.terms[app.activeTerm].cell
+  app.term.beginSearch()
+  if not app.grep.active:
+    app.finishSearch(stopped = false)
+
+proc stepSearch(app: var App) =
+  ## A slice of the `search` per turn, the way an `index` job runs: its lines
+  ## appear as it finds them, and the window keeps answering while it does.
+  if not app.grep.active and app.grepCell.len == 0: return
+  let i = app.searchTerminal()
+  if i < 0:
+    # The panel was closed under it: nobody is reading any more.
+    app.grep.stop()
+    app.grepCell = ""
+    return
+  if app.terms[i].term.stopSearch:
+    app.finishSearch(stopped = true)
+    return
+  let deadline = getTicks() + JobSliceMs
+  var text = ""
+  while app.grep.active and getTicks() < deadline:
+    text.add app.grep.step(files = 16)
+  app.terms[i].term.searchOutput(text)
+  if text.len > 0:
+    app.nextFrame = min(app.nextFrame, getTicks() + OutputFrameMs)
+  if not app.grep.active: app.finishSearch(stopped = false)
+
 proc pollTracker(app: var App) =
   ## The compiler answers frames after the click that asked it, which is the
   ## whole point of asking in a thread -- so nothing here may assume the
@@ -2593,6 +2650,7 @@ proc lookAround(app: var App) =
       b.search.clear()
       b.ed.clearMarkers()
   app.stepWordIndex()
+  app.stepSearch()
   app.pollTracker()
 
 # ---------------------------------------------------------------------------
@@ -3187,6 +3245,8 @@ proc runTermAction(app: var App; act: TermAction) =
     discard
   of indexWords:
     runIndexCommand(act, app.words, app.job, app.tabs.note)
+  of searchFiles:
+    app.startSearch(act)
   of resetConfig, selectTheme, splitPanel, closePanel:
     # Unreachable: `defaults`, `theme` and the panel commands are the
     # prompt's, and this is the terminal -- there the words are programs'
@@ -3254,6 +3314,9 @@ proc runStatusAction(app: var App; act: TermAction) =
   of indexWords:
     runIndexCommand(act, app.words, app.job, app.tabs.note)
     return
+  of searchFiles:
+    app.tabs.note = "search is typed in the terminal: it looks through the " &
+                    "directory the terminal is in"
   of resetConfig:
     runDefaults(app.buffers, app.tabs.note)
   of selectTheme:

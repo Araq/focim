@@ -11,6 +11,7 @@ into the status bar or the terminal:
 | `next`, `prev` / `v` | move to the next match, or the one before |
 | `replace <text> <with>` or `r <text> <with>` | ask about every match in this tab |
 | `replaceall <text> <with>` | the same, in every open tab |
+| `search <text>` | every match in every file under the terminal's directory, listed in the terminal |
 
 `Ctrl+F` is `find ` already typed into the prompt, `F3` and `Shift+F3` are
 `next` and `prev`, and `Ctrl+P` is `open ` -- the three things one reaches for
@@ -79,12 +80,43 @@ One `Ctrl+Z` takes back one replacement, however long the text that went in.
 
 A replacement may be nothing: `r debugEcho ''` deletes every match.
 
+## Searching a directory
+
+`search` is typed in the terminal, and looks through the directory the
+terminal is in and everything below it. The scope is not a setting: `cd ..`
+and the same `search` again is the bigger search.
+
+```
+search needle w --exclude nimcache --exclude '*.c'
+src/focim.nim:314:5: var needle = "editor"
+tests/x.nim:12:3: needle.add 1
+2 lines in 2 files (141 files searched in /home/me/project)
+```
+
+Every line is `path:line:col:` and the text of the line, so `Ctrl+click`
+goes there -- the same as on a compiler message. The options are `find`'s:
+`w`, `c`, `i` mean the same thing here.
+
+`--exclude <pattern>` leaves things out, as often as needed; `-x` is short for
+it, `--exclude=<pattern>` works too, and one may list several separated by
+commas. A pattern without a `/` is matched against names at any depth --
+`nimcache` is every directory of that name, `*.c` every C file -- and one with
+a `/` against the path from where the search started, for `tests/data` and no
+other `data`. `.git`, `.hg` and `.svn` are left out without being asked, and
+so are binary files and anything over 4 MB.
+
+A file with unsaved edits in a tab is searched as the tab has it, since that
+is the text a click will land in. The results appear as they are found, and
+the window goes on answering while they do. `Ctrl+C` or Enter stops it, and
+it stops by itself at 1000 lines -- a word that common wants making longer.
+
+The list is what the files said when it was made. An edit above a match
+moves the match and not the line that points to it; search again.
+
 ## What it does not do
 
-**It does not touch a file that is not open.** The search walks the open tabs,
-which is what `findall` means -- a project-wide search would be a different
-feature with a different result panel, and the terminal is right there with
-`grep`.
+**It does not replace in a file that is not open.** `replace` and `replaceall`
+work on the tabs, where every replacement is an edit `Ctrl+Z` can take back.
 
 **It does not filter lines.** nimedit's `filter` command hid every line without
 a match; that needs a display mode this editor's buffer does not have.

@@ -381,6 +381,7 @@ type
     openFile,           ## user typed `o <file>` / `open <file>`
     saveFile,           ## user typed `save` / `s [<file>]`
     searchText,         ## user typed `find` / `findall` / `replace` / `replaceall`
+    searchFiles,        ## user typed `search <text>`: every file under `cwd`
     gotoMatch,          ## user typed `next` / `prev`
     answer,             ## a line typed while `question` was up
     indexWords,         ## user typed `index <path>` or `unindex <path>`
@@ -407,6 +408,11 @@ type
                         ## is the host's business
       replacing*: bool  ## `replace` / `replaceall` rather than a plain find
       allBuffers*: bool ## `findall` / `replaceall` rather than this one
+    of searchFiles:
+      pattern*: string  ## what to look for
+      flags*: string    ## the option letters, as for `searchText`
+      excludes*: seq[string] ## what `--exclude` named, uninterpreted
+      dir*: string      ## where to look: the terminal's directory
     of gotoMatch:
       backwards*: bool  ## `prev` rather than `next`
     of answer:
@@ -492,6 +498,10 @@ type
     headFile: string    ## the `HEAD` `branch` was read from, "" when
                         ## `branchDir` is no part of a checkout. Cached along
                         ## with it: finding it means a walk up the tree.
+    searching*: bool    ## a `search` is writing into this terminal: the host
+                        ## owns the output, and puts the prompt back when it
+                        ## is done -- see `beginSearch` and `endSearch`
+    stopSearch*: bool   ## and somebody asked it to stop, with Ctrl+C or Enter
     headStamp: HeadStamp ## what that file looked like when it was read. A
                         ## `git checkout` rewrites it, which is how the prompt
                         ## notices a branch it did not switch itself.
@@ -769,9 +779,65 @@ proc dirContents(t: var Terminal; ext: string) =
       inc i
   t.ed.appendOutput("\L")
 
+proc beginSearch*(t: var Terminal) =
+  ## The host is about to write a `search`'s lines here, a slice at a time.
+  ## No prompt until it is done: the output is not finished, and a prompt in
+  ## the middle of it would be a command line with more results under it.
+  t.searching = true
+  t.stopSearch = false
+  t.endOutput()
+  t.outputStart = t.ed.len
+
+proc searchOutput*(t: var Terminal; text: string) =
+  ## Lines of a `search`, appended above whatever is being typed meanwhile --
+  ## which would otherwise end up in the middle of the results, and
+  ## read-only there.
+  if text.len == 0: return
+  var typed = t.getCommand()
+  if typed.len > 0: t.emptyCmd()
+  t.ed.appendOutput(text)
+  if typed.len > 0: t.ed.insertText(typed)
+
+proc endSearch*(t: var Terminal; summary: string) =
+  t.searchOutput(summary & "\L")
+  let typed = t.getCommand()
+  if typed.len > 0: t.emptyCmd()
+  t.searching = false
+  t.stopSearch = false
+  t.insertPrompt()
+  if typed.len > 0: t.ed.insertText(typed)
+  # Back to the top of the results, the way a program's output is left.
+  if t.outputStart >= 0:
+    t.ed.scrollToOutput(t.outputStart)
+    t.outputStart = -1
+
+proc parseSearch(t: Terminal; cmd: string; i: int): TermAction =
+  ## `search <text> [options] [--exclude <pattern>]...`, where an exclude is
+  ## also `--exclude=<pattern>`, and either may list several, comma separated.
+  result = TermAction(kind: searchFiles, dir: t.cwd)
+  var i = parseWord(cmd, result.pattern, i)
+  while true:
+    var w = ""
+    i = parseWord(cmd, w, i)
+    if w.len == 0: break
+    if w == "--exclude" or w == "-x":
+      var p = ""
+      i = parseWord(cmd, p, i)
+      if p.len > 0: result.excludes.add p
+    elif w.startsWith("--exclude="):
+      result.excludes.add w["--exclude=".len .. ^1]
+    else:
+      result.flags.add w
+
 proc runCommand*(t: var Terminal; cmd: var string): TermAction =
   result = TermAction(kind: noAction)
   t.files.setLen 0
+  if t.searching:
+    # Enter while a search is still writing stops it, like Ctrl+C: a second
+    # command's output in the middle of the first one's would be neither.
+    t.stopSearch = true
+    t.emptyCmd()
+    return
   if t.question.len > 0 and not t.processRunning:
     # This line answers what the host asked. It is not a command, and it is
     # not history either: what was typed is one word of an exchange, and the
@@ -870,6 +936,18 @@ proc runCommand*(t: var Terminal; cmd: var string): TermAction =
     result = TermAction(kind: searchText, term: term, replacement: with,
                         opts: opts, replacing: true,
                         allBuffers: a == "replaceall")
+  of "search":
+    # The terminal's own, not the prompt's: it searches the directory the
+    # terminal is in, and the prompt has none. `cd ..` is the bigger search.
+    if t.isPrompt:
+      # Handed over with no directory, so the host can say where to type it.
+      t.insertPrompt()
+      return TermAction(kind: searchFiles)
+    result = t.parseSearch(cmd, i)
+    if result.pattern.len == 0:
+      t.ed.appendOutput "search <text> [options] [--exclude <pattern>]\L"
+      t.insertPrompt()
+      return TermAction(kind: noAction)
   of "next":
     t.insertPrompt()
     result = TermAction(kind: gotoMatch)
@@ -1128,6 +1206,10 @@ proc draw*(t: var Terminal; e: Event; area: Rect; focused: bool): TermAction =
         # it mean the other thing and stop the program.
         if ctrl and t.processRunning and not t.ed.hasSelection:
           t.sendBreak()
+          t.ed.render(area, showCursor = true)
+          return
+        if ctrl and t.searching and not t.ed.hasSelection:
+          t.stopSearch = true
           t.ed.render(area, showCursor = true)
           return
       of KeyV:

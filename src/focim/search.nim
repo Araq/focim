@@ -60,11 +60,13 @@ proc parseSearchOptions*(s: string): SearchOptions =
 proc conv(c: char; opts: SearchOptions): char {.inline.} =
   if ignoreCase in opts: c.toLowerAscii else: c
 
-proc findHits*(ed: SynEdit; term: string; opts: SearchOptions;
-               replacement = ""): seq[SearchHit] =
+proc findHits*[T: SynEdit | string](ed: T; term: string; opts: SearchOptions;
+                                    replacement = ""): seq[SearchHit] =
   ## Every occurrence of `term`, left to right. Matches do not overlap: what
   ## follows a hit is looked for behind it, so `aa` in `aaa` is one hit and a
-  ## replace cannot eat its own output.
+  ## replace cannot eat its own output. A buffer or a plain string: the
+  ## `search` command looks through files nobody has open with the very same
+  ## rules, so an option means one thing wherever it is typed.
   result = @[]
   if term.len == 0: return
   # A single letter is looked for as a word, always: `f i` is meant to find the
