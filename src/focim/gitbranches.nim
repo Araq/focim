@@ -72,14 +72,6 @@ proc switchBranch*(root, name: string; error: var string): bool =
   result = r.code == 0
   error = if result: "" else: message(r.output)
 
-proc deleteBranch*(root, name: string; error: var string): bool =
-  ## `git branch -d`: a branch that is not merged anywhere is refused, as is
-  ## the one that is checked out. A click on an `x` is too small a gesture to
-  ## throw away commits with; `git branch -D` in the terminal is the big one.
-  let r = git(root, ["branch", "-d", name])
-  result = r.code == 0
-  error = if result: "" else: message(r.output)
-
 # ---------------------------------------------------------------------------
 # What a branch is about -- the files it changed since it left the default
 # branch, and where in each of them it first did
@@ -160,3 +152,76 @@ proc touchedFiles*(root: string; limit = 30): seq[Touched] =
         let full = root / p
         if fileExists(full): result.add Touched(path: full, line: line)
         break
+
+# ---------------------------------------------------------------------------
+# Deleting: only what has landed
+# ---------------------------------------------------------------------------
+
+proc landedIn*(root, name, base: string): bool =
+  ## Are `name`'s changes in `base`? Asked three ways, since a pull request
+  ## can land three ways:
+  ##
+  ## - merged: the branch is an ancestor of `base`;
+  ## - rebased: every commit of it has a twin in `base` with the same patch,
+  ##   which is what `git cherry` answers with a `-`;
+  ## - squashed: the branch's whole change, as one commit on top of where it
+  ##   forked, has such a twin. That commit is made for the question, never
+  ##   signed -- nobody is asked for a passphrase to answer a click -- and
+  ##   left unreferenced, so git's next gc takes it away again.
+  if git(root, ["merge-base", "--is-ancestor", name, base]).code == 0:
+    return true
+  let each = git(root, ["cherry", base, name])
+  if each.code != 0: return false
+  var all = true
+  for l in each.output.splitLines:
+    if l.startsWith("+"): all = false
+  if all: return true
+  let fork = git(root, ["merge-base", base, name])
+  if fork.code != 0: return false
+  let squash = git(root, ["-c", "user.name=focim",
+                          "-c", "user.email=focim@localhost",
+                          "commit-tree", "--no-gpg-sign", name & "^{tree}",
+                          "-p", fork.output.strip, "-m", "focim: " & name])
+  if squash.code != 0: return false
+  let one = git(root, ["cherry", base, squash.output.strip])
+  result = one.code == 0 and one.output.strip.startsWith("-")
+
+proc landingRefs(root: string): seq[string] =
+  ## What a branch may have landed in: the remote's default branch and the
+  ## local `main` or `master`. Either counts -- the remote's is the truth
+  ## once fetched, the local one is ahead of it before a push.
+  result = @[]
+  let base = baseRef(root)
+  if base.len > 0: result.add base
+  for name in ["main", "master"]:
+    if name notin result and
+       git(root, ["rev-parse", "--verify", "-q", "refs/heads/" & name]).code == 0:
+      result.add name
+
+proc deleteBranch*(root, name: string; error: var string): bool =
+  ## Only a branch whose changes have landed in the default branch goes: a
+  ## click on an `x` is too small a gesture to throw away work with, and
+  ## `git branch -D` in the terminal is there for the big one. "Landed" is
+  ## `landedIn`, which knows a squash merge -- which `git branch -d` does not,
+  ## and so the delete itself is `-D` once the question has been answered.
+  ## The default branch is never deleted, nor the one that is checked out
+  ## (git refuses that one itself).
+  let refs = landingRefs(root)
+  if refs.len == 0:
+    error = "no main or master branch to have landed in"
+    return false
+  for r in refs:
+    if name == r or "origin/" & name == r:
+      error = name & " is the default branch"
+      return false
+  var landed = false
+  for r in refs:
+    if landedIn(root, name, r):
+      landed = true
+      break
+  if not landed:
+    error = name & " has changes that are not in " & refs[0]
+    return false
+  let r = git(root, ["branch", "-D", name])
+  result = r.code == 0
+  error = if result: "" else: message(r.output)
