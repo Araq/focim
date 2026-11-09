@@ -97,6 +97,54 @@ check("and is not listed any more",
 check("an unmerged one is refused", not deleteBranch(root, "side", err))
 check("and so is the one checked out", not deleteBranch(root, "main", err))
 check("with a reason", err.len > 0)
+check("an unmerged one says what it has not landed in",
+      not deleteBranch(root, "side", err) and err.contains("main"), err)
+
+proc branchOff(name: string; edits: openArray[(string, string)]) =
+  ## A branch from main with one commit per edit.
+  sh "switch -q -c " & name & " main"
+  for (f, text) in edits:
+    writeFile(repo / f, text)
+    sh "add " & f
+    sh "commit -q -m " & quoteShell(name & " " & f)
+  sh "switch -q main"
+
+echo "landed by squash:"
+branchOff("squashed", [("s1.txt", "a\n"), ("s2.txt", "b\n")])
+check("before it lands it stays", not deleteBranch(root, "squashed", err), err)
+sh "merge -q --squash squashed"
+sh "commit -q -m squash"
+check("squashed into main, it is landed",
+      landedIn(root, "squashed", "main"))
+check("though git branch -d would not think so",
+      execCmdEx("git -C " & quoteShell(repo) & " branch -d squashed").exitCode != 0)
+check("and so it goes", deleteBranch(root, "squashed", err), err)
+check("without a trace in the branch list",
+      "squashed" notin listBranches(root).names)
+
+echo "landed by rebase:"
+branchOff("rebased", [("r1.txt", "a\n"), ("r2.txt", "b\n")])
+sh "cherry-pick rebased~1 rebased"
+check("its commits picked onto main one by one, it is landed",
+      landedIn(root, "rebased", "main"))
+check("and goes", deleteBranch(root, "rebased", err), err)
+
+echo "partly landed:"
+branchOff("partly", [("p1.txt", "a\n")])
+sh "merge -q --squash partly"
+sh "commit -q -m partly"
+sh "switch -q partly"
+writeFile(repo / "p2.txt", "more\n")
+sh "add p2.txt"
+sh "commit -q -m more"
+sh "switch -q main"
+check("work added after the squash is not landed",
+      not landedIn(root, "partly", "main"))
+check("and keeps the branch", not deleteBranch(root, "partly", err), err)
+
+echo "the default branch:"
+check("is never deleted", not deleteBranch(root, "main", err) and
+      err.contains("default"), err)
 
 removeDir(repo)
 echo(if failures == 0: "ALL PASS" else: $failures & " FAILURE(S)")

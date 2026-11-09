@@ -31,7 +31,9 @@ each with its own *flipped* edit semantics:
   `[Terminal]` for the one the terminal is in.
 - **Branches**: the git branches of the repository the current file is in,
   when git tracks that file. A click checks one out and its (x) deletes it
-  (`git branch -d`, so an unmerged branch is refused). A switch git refuses
+  -- but only once its changes have landed in main or master, merged,
+  rebased or squashed; anything else, and the default branch itself, is
+  refused with the reason in the status bar. A switch git refuses
   -- changes in the work tree it would overwrite -- leaves the branch as it
   was and puts git's reason in the status bar.
 
