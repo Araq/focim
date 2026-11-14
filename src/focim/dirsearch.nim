@@ -39,6 +39,7 @@ type
     term*: string
     opts*: SearchOptions
     excludes*: seq[string]   ## glob patterns, see `excluded`
+    exts*: seq[string]       ## extensions without the dot; empty is all files
     pending: seq[string]     ## absolute paths still to look at, a stack:
                              ## the next one is the last one
     unsaved: Table[string, string] ## path -> the text a tab has for it
@@ -88,6 +89,16 @@ proc excluded*(s: DirSearch; rel: string): bool =
       return true
   result = false
 
+proc wantedExt*(s: DirSearch; path: string): bool =
+  ## Whether a file is one of the extensions asked for -- any file, when none
+  ## was. Case does not matter: `nim` is meant to find `X.NIM` too.
+  if s.exts.len == 0: return true
+  let e = path.splitFile.ext
+  if e.len < 2: return false
+  for x in s.exts:
+    if cmpIgnoreCase(e[1 .. ^1], x) == 0: return true
+  result = false
+
 proc pushDir(s: var DirSearch; dir: string) =
   ## The entries of `dir`, so that they come off the stack in order:
   ## directories and files alike sorted by name, a directory's contents
@@ -97,6 +108,7 @@ proc pushDir(s: var DirSearch; dir: string) =
   try:
     for kind, path in walkDir(dir):
       if kind in {pcFile, pcLinkToFile, pcDir}:
+        if kind != pcDir and not s.wantedExt(path): continue
         if not s.excluded(relativePath(path, s.dir)): entries.add path
   except CatchableError:
     return
@@ -105,9 +117,10 @@ proc pushDir(s: var DirSearch; dir: string) =
 
 proc startDirSearch*(dir, term: string; opts: SearchOptions;
                      excludes: seq[string];
-                     unsaved: Table[string, string]): DirSearch =
+                     unsaved: Table[string, string];
+                     exts: seq[string] = @[]): DirSearch =
   result = DirSearch(active: term.len > 0 and dirExists(dir), dir: dir,
-                     term: term, opts: opts, unsaved: unsaved)
+                     term: term, opts: opts, unsaved: unsaved, exts: exts)
   for e in excludes:
     # `--exclude a,b` is two of them; an empty one would match nothing anyway.
     for p in e.split(','):
@@ -190,7 +203,9 @@ proc summary*(s: DirSearch; stopped: bool): string =
   result =
     if s.matches == 0: "no match for '" & s.term & "'"
     else: $s.matches & " lines in " & $s.files & " files"
-  result.add " (" & $s.searched & " files searched in " & s.dir & ")"
+  let kinds = if s.exts.len == 0: "" else: "*." & s.exts.join(", *.") & " "
+  result.add " (" & $s.searched & " " & kinds & "files searched in " & s.dir &
+             ")"
   if s.truncated:
     result.add "; stopped at " & $MaxSearchMatches & " -- narrow it down"
   elif stopped:

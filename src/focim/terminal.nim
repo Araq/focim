@@ -20,6 +20,7 @@ import synedit
 import ansi
 when defined(posix): import pty
 import filesearch
+from search import SearchOptionLetters
 import uirelays/[coords, screen, input]
 
 export synedit
@@ -414,6 +415,8 @@ type
       pattern*: string  ## what to look for
       flags*: string    ## the option letters, as for `searchText`
       excludes*: seq[string] ## what `--exclude` named, uninterpreted
+      exts*: seq[string] ## file extensions to look in, without the dot;
+                        ## empty is every file
       dir*: string      ## where to look: the terminal's directory
     of gotoMatch:
       backwards*: bool  ## `prev` rather than `next`
@@ -835,8 +838,11 @@ proc printOutput*(t: var Terminal; text: string): bool =
   result = true
 
 proc parseSearch(t: Terminal; cmd: string; i: int): TermAction =
-  ## `search <text> [options] [--exclude <pattern>]...`, where an exclude is
-  ## also `--exclude=<pattern>`, and either may list several, comma separated.
+  ## `search <text> [options] [ext] [--exclude <pattern>]...`, where an
+  ## exclude is also `--exclude=<pattern>`, and either may list several, comma
+  ## separated. A word of nothing but option letters is options; any other is
+  ## extensions -- `nim`, `nim,nims`, or `.c` / `*.c` for one that would read
+  ## as an option.
   result = TermAction(kind: searchFiles, dir: t.cwd)
   var i = parseWord(cmd, result.pattern, i)
   while true:
@@ -849,8 +855,12 @@ proc parseSearch(t: Terminal; cmd: string; i: int): TermAction =
       if p.len > 0: result.excludes.add p
     elif w.startsWith("--exclude="):
       result.excludes.add w["--exclude=".len .. ^1]
-    else:
+    elif w.allCharsInSet(SearchOptionLetters):
       result.flags.add w
+    else:
+      for e in w.split(','):
+        let e = e.strip(trailing = false, chars = {'*', '.'})
+        if e.len > 0: result.exts.add e
 
 proc runCommand*(t: var Terminal; cmd: var string): TermAction =
   result = TermAction(kind: noAction)
@@ -983,7 +993,7 @@ proc runCommand*(t: var Terminal; cmd: var string): TermAction =
       return TermAction(kind: searchFiles)
     result = t.parseSearch(cmd, i)
     if result.pattern.len == 0:
-      t.ed.appendOutput "search <text> [options] [--exclude <pattern>]\L"
+      t.ed.appendOutput "search <text> [options] [ext] [--exclude <pattern>]\L"
       t.insertPrompt()
       return TermAction(kind: noAction)
   of "next":

@@ -40,9 +40,10 @@ writeFile(root / "other" / "data" / "e.txt", "needle\n")
 writeFile(root / "blob.bin", "needle\0\0\0")
 
 proc run(term, flags: string; excludes: seq[string] = @[];
-         unsaved = initTable[string, string]()): (seq[string], DirSearch) =
+         unsaved = initTable[string, string]();
+         exts: seq[string] = @[]): (seq[string], DirSearch) =
   var s = startDirSearch(root, term, parseSearchOptions(flags), excludes,
-                         unsaved)
+                         unsaved, exts)
   var text = ""
   while s.active: text.add s.step(files = 2)
   result = (text.strip.splitLines, s)
@@ -103,6 +104,17 @@ block:
   check("stops at the cap", lines.len == MaxSearchMatches and s.truncated,
         $lines.len)
   check("and says so", s.summary(false).contains("stopped at"))
+
+echo "extensions:"
+block:
+  let (lines, s) = run("needle", "", exts = @["nim"])
+  check("only the files of that extension, at any depth",
+        lines.len == 3 and lines[0].startsWith("src/b.nim".sep) and
+        lines[2].startsWith("src/sub/c.nim".sep), $lines)
+  check("and the summary says what was looked in",
+        s.summary(false).contains("2 *.nim files searched"), s.summary(false))
+  let (two, _) = run("needle", "", exts = @["NIM", "c"])
+  check("several, and case does not matter", two.len == 4, $two)
 
 echo "nothing found:"
 block:

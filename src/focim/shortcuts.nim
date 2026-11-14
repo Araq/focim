@@ -36,8 +36,8 @@ const Shortcuts*: array[Shortcut, ShortcutInfo] = [
     title: "Ctrl+F   find <text>",
     help: "Searches the current file. F3 and Shift+F3 walk the matches; " &
           "`replace <new>` then asks about each one. In the terminal, " &
-          "`search <text> --exclude <pattern>` searches every file below " &
-          "its directory and lists the matches as lines to click."),
+          "`search <text> [ext] --exclude <pattern>` searches every file " &
+          "below its directory and lists the matches as lines to click."),
   scNew: ShortcutInfo(keys: {KeyN}, label: "N",
     title: "Ctrl+N   new tab",
     help: "A new file, untitled-N.txt in the config directory. It saves " &
