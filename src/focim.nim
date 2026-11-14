@@ -399,6 +399,28 @@ proc extractFilePosition(s: SynEdit; pos: int):
   else:
     result = (path, -1, -1, a, b)
 
+proc filePositionOnLine(s: SynEdit; pos: int; base: string):
+    tuple[file: string, line, col, a, b: int] =
+  ## What a Ctrl+click in the terminal at `pos` points at. The word under the
+  ## pointer when that names something on disk; otherwise the `path:line:col`
+  ## the line starts with, which is the form `search` and the compilers print.
+  ## Without this only a click on the path itself went anywhere: one on the
+  ## numbers asked for a file called `12`, one on the matched text for a file
+  ## called whatever word the match was.
+  result = s.extractFilePosition(pos)
+  proc exists(f, base: string): bool =
+    if f.len == 0: return false
+    let p = if isAbsolute(f): f else: base / f
+    result = fileExists(p) or dirExists(p)
+  if exists(result.file, base): return
+  if pos < 0 or pos >= s.len: return
+  var start = pos
+  while start > 0 and s[start - 1] != '\L': dec start
+  while start < s.len and s[start] in {' ', '\t'}: inc start
+  if start >= pos and result.file.len > 0: return
+  let atStart = s.extractFilePosition(start)
+  if atStart.line >= 0 and exists(atStart.file, base): result = atStart
+
 type
   BufferKind = enum
     ## A buffer is a file, or it is one of the two settings *lanes*: a tab
@@ -1299,7 +1321,7 @@ proc handleTermCtrlClick(buf: SynEdit; pos: int;
                          buffers: var seq[BufferEntry]; current: var int;
                          font: Font; term: var Terminal;
                          focus: var string) =
-  let (file, ln, fc, a, b) = buf.extractFilePosition(pos)
+  let (file, ln, fc, a, b) = buf.filePositionOnLine(pos, term.base)
   if file.len == 0: return
   let path = if isAbsolute(file): file else: term.base / file
   term.ed.underline(a, b)
@@ -3042,6 +3064,28 @@ proc newTab(app: var App) =
   app.showInActivePanel()
   app.focus = gEditorCell
 
+proc findCommand(sel: string): string =
+  ## `find ` with the selected text already typed after it, quoted the way
+  ## `parseWord` reads it back. A selection that cannot be written as one
+  ## word -- several lines, or both kinds of quote -- is left out: a prompt
+  ## that searches for something else than what was selected is worse than
+  ## one that waits for the text.
+  result = "find "
+  if sel.len == 0 or '\L' in sel or '\r' in sel: return
+  let needsQuotes = sel.find({' ', '\t'}) >= 0 or sel[0] in {'\'', '"'}
+  if not needsQuotes: result.add sel
+  elif '\'' notin sel: result.add "'" & sel & "'"
+  elif '"' notin sel: result.add "\"" & sel & "\""
+
+proc selectionToFind(app: App): string =
+  ## The text Ctrl+F searches for without being told: what is selected in the
+  ## terminal the keys are going to, else what is selected in the tab.
+  for t in app.terms:
+    if t.cell == app.focus and t.term.ed.hasSelection:
+      return t.term.ed.getSelectedText()
+  if app.current < app.buffers.len:
+    result = app.buffers[app.current].ed.getSelectedText()
+
 proc prepareCommand(app: var App; cells: Table[string, Rect]; cmd: string) =
   ## Ctrl+P and Ctrl+F: the prompt, with the command already typed.
   if "status" in cells:
@@ -3071,7 +3115,7 @@ proc runShortcut(app: var App; sc: Shortcut; cells: Table[string, Rect];
     # The same quick way in as Ctrl+P, for the other command one reaches
     # for without thinking. `find ` and not `f `: the long name is the one
     # that says what the line is about while it is being typed.
-    app.prepareCommand(cells, "find ")
+    app.prepareCommand(cells, findCommand(app.selectionToFind()))
   of scNew:
     app.newTab()
   of scClose:
@@ -3529,7 +3573,8 @@ proc runTermAction(app: var App; act: TermAction) =
     # names.
     discard
   of ctrlHover:
-    let (_, _, _, a, b) = app.term.ed.extractFilePosition(act.pos)
+    let (_, _, _, a, b) = app.term.ed.filePositionOnLine(act.pos,
+                                                        app.term.base)
     app.term.ed.underline(a, b)
   of ctrlClick:
     app.term.ed.underline(-1, -1)

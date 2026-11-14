@@ -13,7 +13,8 @@ into the status bar or the terminal:
 | `replaceall <text> <with>` | the same, in every open tab |
 | `search <text>` | every match in every file under the terminal's directory, listed in the terminal |
 
-`Ctrl+F` is `find ` already typed into the prompt, `F3` and `Shift+F3` are
+`Ctrl+F` is `find ` already typed into the prompt -- with the selected text
+after it, when something is selected -- `F3` and `Shift+F3` are
 `next` and `prev`, and `Ctrl+P` is `open ` -- the three things one reaches for
 without thinking.
 
@@ -94,7 +95,8 @@ tests/x.nim:12:3: needle.add 1
 ```
 
 Every line is `path:line:col:` and the text of the line, so `Ctrl+click`
-goes there -- the same as on a compiler message. The options are `find`'s:
+goes there -- the same as on a compiler message, and anywhere on the line: on
+the path, on the numbers, or on the match itself. The options are `find`'s:
 `w`, `c`, `i` mean the same thing here.
 
 `--exclude <pattern>` leaves things out, as often as needed; `-x` is short for
