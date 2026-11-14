@@ -46,6 +46,11 @@ type
     active*: int         ## the hit the finger is on; `hits.len` when past the end
     version: int         ## the text version `hits` were found in
 
+const SearchOptionLetters* = {'i', 'I', 'y', 'Y', 'w', 'W', 'b', 'B', 's', 'S',
+                              'p', 'P', 'c', 'C', 'f', 'F'}
+  ## Every letter `parseSearchOptions` knows: what tells an options word after
+  ## `search <text>` from an extension.
+
 proc parseSearchOptions*(s: string): SearchOptions =
   result = {ignoreCase}
   for c in s:

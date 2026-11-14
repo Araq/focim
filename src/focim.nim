@@ -2775,7 +2775,7 @@ proc startSearch(app: var App; act: TermAction) =
   for b in app.buffers:
     if b.path.len > 0 and b.ed.changed: unsaved[b.path] = b.ed.fullText
   app.grep = startDirSearch(act.dir, act.pattern, parseSearchOptions(act.flags),
-                            act.excludes, unsaved)
+                            act.excludes, unsaved, act.exts)
   app.grepCell = app.terms[app.activeTerm].cell
   app.term.beginSearch()
   if not app.grep.active:

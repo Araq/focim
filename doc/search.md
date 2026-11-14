@@ -99,6 +99,11 @@ goes there -- the same as on a compiler message, and anywhere on the line: on
 the path, on the numbers, or on the match itself. The options are `find`'s:
 `w`, `c`, `i` mean the same thing here.
 
+A word after the text that is not made of option letters is an extension:
+`search foobar nim` looks in the `*.nim` files only. Several are written
+`nim,nims` or as separate words. `c` on its own is the case option, so the C
+files are `.c` or `*.c` -- the dot or star is allowed on any of them.
+
 `--exclude <pattern>` leaves things out, as often as needed; `-x` is short for
 it, `--exclude=<pattern>` works too, and one may list several separated by
 commas. A pattern without a `/` is matched against names at any depth --

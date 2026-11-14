@@ -249,6 +249,17 @@ block: # `search`, whose output the host writes in a slice at a time
   check("every spelling of an exclude is collected",
         a.excludes == @["nimcache", "*.c", "a,b"], $a.excludes)
   check("and it searches where the terminal is", a.dir == "/somewhere", a.dir)
+  check("no extension is every file", a.exts.len == 0, $a.exts)
+  a = t.ran("search foobar nim")
+  check("a word that is not options is an extension",
+        a.exts == @["nim"] and a.flags == "", $a.exts & " " & a.flags)
+  a = t.ran("search foobar w nim,nims .c *.h")
+  check("as many as wanted, with or without the dot",
+        a.exts == @["nim", "nims", "c", "h"] and a.flags == "w",
+        $a.exts & " " & a.flags)
+  a = t.ran("search foobar c")
+  check("but `c` alone is still the option", a.flags == "c" and a.exts.len == 0,
+        $a.exts & " " & a.flags)
 
   t.beginSearch()
   t.typeText("ls")
